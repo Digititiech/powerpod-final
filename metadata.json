@@ -1,0 +1,7 @@
+{
+  "name": "PowerPod Merchant & Sales Management",
+  "description": "A comprehensive enterprise-grade platform for PowerPod to manage merchant relations, process complex Excel sales data, generate financial reports, and handle automated revenue distribution.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

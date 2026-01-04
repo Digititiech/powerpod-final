@@ -1,0 +1,38 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@supabase/functions-js@2.4.5": "2.4.5"
+  },
+  "jsr": {
+    "@supabase/functions-js@2.4.5": {
+      "integrity": "ead2df253fe0c3b0b682c5f25076978ab62c10afff4d04222451a90ba512c394"
+    }
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@google/genai@^1.34.0",
+        "npm:@supabase/supabase-js@^2.89.0",
+        "npm:@types/cors@^2.8.19",
+        "npm:@types/express@^5.0.6",
+        "npm:@types/node@^22.14.0",
+        "npm:@types/nodemailer@^7.0.4",
+        "npm:@vitejs/plugin-react@5",
+        "npm:@whiskeysockets/baileys@^7.0.0-rc.9",
+        "npm:cors@^2.8.5",
+        "npm:dotenv@^17.2.3",
+        "npm:express@^5.2.1",
+        "npm:lucide-react@0.562",
+        "npm:nodemailer@^7.0.12",
+        "npm:pino@^10.1.0",
+        "npm:qrcode@^1.5.4",
+        "npm:react-dom@^19.2.3",
+        "npm:react@^19.2.3",
+        "npm:recharts@^3.6.0",
+        "npm:supabase@^2.70.5",
+        "npm:typescript@~5.8.2",
+        "npm:vite@^6.2.0"
+      ]
+    }
+  }
+}

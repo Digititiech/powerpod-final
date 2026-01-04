@@ -1,0 +1,10 @@
+{
+  "tasks": {
+    "start": "deno run --allow-net --allow-env --allow-read index.ts"
+  },
+  "imports": {
+    "nodemailer": "npm:nodemailer@6.9.13",
+    "@supabase/functions-js": "jsr:@supabase/functions-js@2.4.5"
+  },
+  "nodeModulesDir": "auto"
+}
