@@ -35,6 +35,7 @@ import {
   Cell 
 } from 'recharts';
 import { supabase } from '../lib/supabase';
+import Transactions from './Transactions';
 
 type PaymentFilterType = 'ALL' | 'PENDING' | 'SETTLED';
 
@@ -43,6 +44,7 @@ interface DashboardProps {
 }
 
 const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
+  const [currentTab, setCurrentTab] = useState<'overview' | 'transactions'>('overview');
   const [loading, setLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
   const [stats, setStats] = useState({
@@ -67,6 +69,36 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
 
   const n = (val: any) => Number(val) || 0;
   const f = (val: any) => (Number(val) || 0).toFixed(2);
+
+  const monthMap: { [key: string]: number } = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+  };
+
+  const parseMonthYear = (str: string) => {
+    // Split by space, dash, or comma
+    const parts = str.trim().split(/[\s,-]+/);
+    if (parts.length < 2) return 0;
+    
+    // Try to find month and year
+    let monthStr = '';
+    let year = 0;
+    
+    // Check if first part is month
+    if (isNaN(parseInt(parts[0]))) {
+      monthStr = parts[0].toLowerCase().substring(0, 3);
+      year = parseInt(parts[1]);
+    } else {
+      // Maybe year first? e.g. 2024-Jan
+      year = parseInt(parts[0]);
+      monthStr = parts[1].toLowerCase().substring(0, 3);
+    }
+
+    const month = monthMap[monthStr];
+    
+    if (isNaN(year) || month === undefined) return 0;
+    return new Date(year, month).getTime();
+  };
 
   // Click outside for month picker
   useEffect(() => {
@@ -105,9 +137,14 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           return lower !== 'parsed period' && !lower.includes('pending') && !lower.includes('audit');
         }) as string[];
       
-      setAvailableMonths(months);
-      if (months.length > 0 && selectedMonths.length === 0) {
-        setSelectedMonths(months);
+      // Sort months chronologically descending (newest first)
+      const sortedMonths = months.sort((a, b) => {
+        return parseMonthYear(b) - parseMonthYear(a);
+      });
+
+      setAvailableMonths(sortedMonths);
+      if (sortedMonths.length > 0 && selectedMonths.length === 0) {
+        setSelectedMonths(sortedMonths);
       }
     } catch (err) {
       console.error('Fetch months error:', err);
@@ -164,7 +201,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         return lower !== 'parsed period' && !lower.includes('pending') && !lower.includes('audit');
       }) || [];
 
-      setChartData(filteredReports.map(r => ({
+      // Sort reports chronologically
+      const sortedReports = filteredReports.sort((a, b) => {
+        return parseMonthYear(a.report_month) - parseMonthYear(b.report_month);
+      });
+
+      setChartData(sortedReports.map(r => ({
         name: r.report_month,
         sales: r.total_sales
       })));
@@ -299,11 +341,28 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     <div className="space-y-10 animate-in fade-in duration-700 pb-20">
       {/* Header & Main Controls */}
       <div className="flex flex-col lg:flex-row lg:justify-between lg:items-end gap-6">
-        <div>
-          <h1 className="text-4xl font-black text-gray-900 tracking-tighter">Command Center</h1>
-          <p className="text-gray-500 mt-1 font-medium">Real-time ecosystem intelligence.</p>
+        <div className="flex flex-col gap-4">
+          <div>
+            <h1 className="text-4xl font-black text-gray-900 tracking-tighter">Command Center</h1>
+            <p className="text-gray-500 mt-1 font-medium">Real-time ecosystem intelligence.</p>
+          </div>
+          <div className="flex items-center space-x-1 p-1 bg-gray-100/50 rounded-xl w-fit">
+            <button 
+              onClick={() => setCurrentTab('overview')}
+              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${currentTab === 'overview' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
+            >
+              Overview
+            </button>
+            <button 
+              onClick={() => setCurrentTab('transactions')}
+              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${currentTab === 'transactions' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
+            >
+              Transactions
+            </button>
+          </div>
         </div>
         
+        {currentTab === 'overview' && (
         <div className="flex flex-wrap items-center gap-3">
           {/* Status Filters */}
           <div className="flex items-center p-1 bg-white border border-gray-100 rounded-[20px] shadow-sm">
@@ -352,8 +411,11 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
             )}
           </div>
         </div>
+        )}
       </div>
 
+      {currentTab === 'overview' ? (
+        <>
       {/* Custom Date Filter Sub-Bar */}
       <div className="bg-white p-4 rounded-[24px] border border-gray-100 shadow-sm flex flex-col md:flex-row items-center gap-4">
         <div className="flex items-center space-x-3 text-[10px] font-black text-gray-400 uppercase tracking-widest px-2">
@@ -459,13 +521,34 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
                 <div className="flex-1 w-full h-[400px]">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={chartData}>
+                      <defs>
+                        <linearGradient id="salesGradient" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#2563eb" stopOpacity={0.8}/>
+                          <stop offset="95%" stopColor="#2563eb" stopOpacity={0.1}/>
+                        </linearGradient>
+                      </defs>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
-                      <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#9ca3af', fontSize: 10, fontWeight: 700}} dy={15} />
-                      <YAxis axisLine={false} tickLine={false} tick={{fill: '#9ca3af', fontSize: 10, fontWeight: 700}} />
-                      <Tooltip cursor={{fill: '#f9fafb'}} contentStyle={{borderRadius: '24px', border: 'none', boxShadow: '0 25px 50px -12px rgb(0 0 0 / 0.1)'}} />
-                      <Bar dataKey="sales" radius={[12, 12, 0, 0]} barSize={40}>
+                      <XAxis 
+                        dataKey="name" 
+                        axisLine={false} 
+                        tickLine={false} 
+                        tick={{fill: '#9ca3af', fontSize: 10, fontWeight: 700}} 
+                        dy={15} 
+                      />
+                      <YAxis 
+                        axisLine={false} 
+                        tickLine={false} 
+                        tick={{fill: '#9ca3af', fontSize: 10, fontWeight: 700}} 
+                        tickFormatter={(value) => `AED ${(value / 1000).toFixed(0)}k`}
+                      />
+                      <Tooltip 
+                        cursor={{fill: '#f9fafb'}} 
+                        contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 25px 50px -12px rgb(0 0 0 / 0.1)', padding: '16px'}}
+                        formatter={(value: number) => [`AED ${value.toLocaleString()}`, 'Total Sales']}
+                      />
+                      <Bar dataKey="sales" radius={[8, 8, 0, 0]} barSize={40} fill="url(#salesGradient)">
                         {chartData.map((_, index) => (
-                          <Cell key={`cell-${index}`} fill={index === chartData.length - 1 ? '#2563eb' : '#e5e7eb'} />
+                          <Cell key={`cell-${index}`} fillOpacity={1} />
                         ))}
                       </Bar>
                     </BarChart>
@@ -519,6 +602,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
             </div>
           </div>
         </>
+      )}
+      </>
+      ) : (
+        <Transactions />
       )}
     </div>
   );

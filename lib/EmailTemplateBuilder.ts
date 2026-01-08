@@ -16,7 +16,7 @@ export const generateEmailHtml = (data: {
   totalPayout: string;
   contractType: string;
   revenueShare: string;
-  remittanceNote?: string;
+  notes?: Array<{ period: string; note: string }>;
 }) => {
   const rows = data.periodDetails.map(p => `
     <tr>
@@ -65,10 +65,15 @@ export const generateEmailHtml = (data: {
           <p style="margin: 5px 0; font-size: 14px; color: #555;">Total Payable to You: <strong style="color: #E67E22; font-size: 18px;">${data.totalPayout}</strong></p>
         </div>
 
-        ${data.remittanceNote ? `
+        ${data.notes && data.notes.length > 0 ? `
         <div style="margin-top: 20px; background-color: #fff3cd; padding: 15px; border-radius: 8px; border-left: 5px solid #ffc107;">
-          <h4 style="margin: 0 0 5px 0; color: #856404; font-size: 14px;">Remittance Note:</h4>
-          <p style="margin: 0; color: #555; font-style: italic;">${data.remittanceNote}</p>
+          <h4 style="margin: 0 0 5px 0; color: #856404; font-size: 14px;">Notes & Remittance:</h4>
+          ${data.notes.map(n => `
+            <div style="margin-bottom: 8px; border-bottom: 1px solid rgba(0,0,0,0.05); padding-bottom: 8px;">
+              <span style="font-weight: bold; font-size: 12px; color: #856404;">${n.period}:</span>
+              <span style="color: #555; font-style: italic; font-size: 13px;">${n.note}</span>
+            </div>
+          `).join('')}
         </div>
         ` : ''}
 

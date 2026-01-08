@@ -1,7 +1,7 @@
 
 export type UserRole = 'admin' | 'staff' | 'technician';
 
-export type View = 'dashboard' | 'merchants' | 'assets' | 'processor' | 'reports' | 'settings' | 'users';
+export type View = 'dashboard' | 'merchants' | 'assets' | 'processor' | 'reports' | 'settings' | 'users' | 'transactions';
 
 export interface Profile {
   id: string;

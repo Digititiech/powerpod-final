@@ -22,6 +22,7 @@ import MonthlyReports from './views/MonthlyReports';
 import UserManagement from './views/UserManagement';
 import Settings from './views/Settings';
 import Login from './views/Login';
+import UpdatePassword from './views/UpdatePassword';
 import { supabase } from './lib/supabase';
 import { SyncProvider, useSync } from './lib/SyncContext';
 import { Profile } from './types';
@@ -30,6 +31,7 @@ type View = 'dashboard' | 'merchants' | 'assets' | 'processor' | 'reports' | 'se
 
 const AppContent: React.FC = () => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState<boolean>(false);
   const [currentView, setCurrentView] = useState<View>('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
   const [userProfile, setUserProfile] = useState<Profile | null>(null);
@@ -59,7 +61,10 @@ const AppContent: React.FC = () => {
       }
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        setIsPasswordRecovery(true);
+      }
       setIsAuthenticated(!!session);
       if (session?.user) {
         fetchUserProfile(session.user.id);

@@ -92,6 +92,7 @@ const MonthlyReports: React.FC = () => {
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
   const [venueStats, setVenueStats] = useState<Record<string, {name: string, sales: number}[]>>({});
   const [transactionCounts, setTransactionCounts] = useState<Record<string, number>>({});
+  const [periodStations, setPeriodStations] = useState<Record<string, string[]>>({});
 
   const f = (val: any) => (Number(val) || 0).toFixed(2);
   const n = (val: any) => Number(val) || 0;
@@ -151,26 +152,86 @@ const MonthlyReports: React.FC = () => {
     }
   };
 
-  const fetchReports = async () => {
+  const fetchReports = async (forceRefresh = false) => {
     setLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('merchant_period_summaries')
-        .select(`
-          *,
-          monthly_reports!inner (report_month),
-          merchants!inner (id, merchant_name, contract_type, revenue_share_percentage, company_name, email, phone, contact_name, bank_name, bank_account_number, iban)
-        `)
-        .in('monthly_reports.report_month', selectedGlobalMonths);
+    const cacheKey = `reports_cache_${selectedGlobalMonths.slice().sort().join('_')}`;
 
-      if (error) throw error;
+    if (!forceRefresh) {
+        try {
+            const cached = localStorage.getItem(cacheKey);
+            if (cached) {
+                const parsed = JSON.parse(cached);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    console.log("Loaded reports from local cache");
+                    setReports(parsed);
+                    
+                    // Restore auxiliary state
+                    const initialSelections: Record<string, string[]> = {};
+                    const initialNotes: Record<string, string> = {};
+                    parsed.forEach((r: any) => {
+                        const mId = r.merchants.id;
+                        const month = r.monthly_reports.report_month;
+                        if (!initialSelections[mId]) initialSelections[mId] = [];
+                        initialSelections[mId].push(month);
+                        if (r.remittance_note) initialNotes[r.id] = r.remittance_note;
+                    });
+                    setMerchantSelections(initialSelections);
+                    setRemittanceNotes(initialNotes);
+                    
+                    fetchVenueDetailsSilent(parsed);
+                    setLoading(false);
+                    return;
+                }
+            }
+        } catch (e) {
+            console.warn("Failed to load from cache", e);
+        }
+    }
+
+    try {
+      let allData: any[] = [];
+      let from = 0;
+      const pageSize = 1000;
+      let fetchMore = true;
+
+      while (fetchMore) {
+        const { data, error } = await supabase
+          .from('merchant_period_summaries')
+          .select(`
+            *,
+            monthly_reports!inner (report_month),
+            merchants!inner (id, merchant_name, contract_type, revenue_share_percentage, company_name, email, phone, contact_name, bank_name, bank_account_number, iban)
+          `)
+          .in('monthly_reports.report_month', selectedGlobalMonths)
+          .range(from, from + pageSize - 1);
+
+        if (error) throw error;
+        
+        if (data && data.length > 0) {
+          allData = [...allData, ...data];
+          if (data.length < pageSize) {
+            fetchMore = false;
+          } else {
+            from += pageSize;
+          }
+        } else {
+          fetchMore = false;
+        }
+      }
       
-      setReports(data || []);
+      setReports(allData);
+      
+      // Cache the result
+      try {
+          localStorage.setItem(cacheKey, JSON.stringify(allData));
+      } catch (e) {
+          console.warn("Failed to save to cache (likely quota exceeded)", e);
+      }
       
       const initialSelections: Record<string, string[]> = {};
       const initialNotes: Record<string, string> = {};
       
-      data?.forEach(r => {
+      allData.forEach(r => {
         const mId = r.merchants.id;
         const month = r.monthly_reports.report_month;
         if (!initialSelections[mId]) initialSelections[mId] = [];
@@ -184,7 +245,7 @@ const MonthlyReports: React.FC = () => {
       setRemittanceNotes(initialNotes);
 
       // Trigger silent background fetch for details
-      fetchVenueDetailsSilent(data || []);
+      fetchVenueDetailsSilent(allData);
       
     } catch (err) {
       console.error(err);
@@ -201,15 +262,16 @@ const MonthlyReports: React.FC = () => {
       if (summaryIds.length === 0) return;
 
       try {
-        const BATCH_SIZE = 100;
+        const BATCH_SIZE = 50;
         let allTxData: any[] = [];
         
         for (let i = 0; i < summaryIds.length; i += BATCH_SIZE) {
             const batch = summaryIds.slice(i, i + BATCH_SIZE);
             const { data: txData, error } = await supabase
                 .from('sales_transactions')
-                .select('summary_id, venue_name, amount')
-                .in('summary_id', batch);
+                .select('summary_id, venue_name, station_name, amount')
+                .in('summary_id', batch)
+                .limit(5000);
             
             if (error) {
                  console.error("Background fetch error batch:", error);
@@ -221,11 +283,13 @@ const MonthlyReports: React.FC = () => {
         if (allTxData) {
             const stats: Record<string, Record<string, number>> = {};
             const counts: Record<string, number> = {};
+            const stations: Record<string, Set<string>> = {};
 
             // Initialize for these summaries
             summaryIds.forEach(id => { 
                 stats[id] = {}; 
                 counts[id] = 0;
+                stations[id] = new Set();
             });
 
             allTxData.forEach(tx => {
@@ -237,19 +301,24 @@ const MonthlyReports: React.FC = () => {
                     if (!stats[sId][vName]) stats[sId][vName] = 0;
                     stats[sId][vName] += amt;
                     counts[sId] = (counts[sId] || 0) + 1;
+                    if (tx.station_name) stations[sId].add(tx.station_name);
                 }
             });
             
             const newStats: Record<string, {name: string, sales: number}[]> = {};
+            const newStations: Record<string, string[]> = {};
+
             Object.keys(stats).forEach(sId => {
                 newStats[sId] = Object.entries(stats[sId])
                   .map(([name, sales]) => ({ name, sales }))
                   .sort((a, b) => b.sales - a.sales);
+                newStations[sId] = Array.from(stations[sId]);
             });
             
             // Merge with existing cache
             setVenueStats(prev => ({ ...prev, ...newStats }));
             setTransactionCounts(prev => ({ ...prev, ...counts }));
+            setPeriodStations(prev => ({ ...prev, ...newStations }));
         }
       } catch (err) {
           console.error("Background fetch error:", err);
@@ -420,13 +489,7 @@ const MonthlyReports: React.FC = () => {
   const sortMonths = (a: string, b: string) => {
     const timeA = parseMonthYear(a);
     const timeB = parseMonthYear(b);
-    const dateA = new Date(timeA);
-    const dateB = new Date(timeB);
-
-    if (dateA.getFullYear() !== dateB.getFullYear()) {
-      return dateB.getFullYear() - dateA.getFullYear(); // Year Descending
-    }
-    return dateA.getMonth() - dateB.getMonth(); // Month Ascending
+    return timeA - timeB; // Chronological Ascending (Oldest to Newest)
   };
 
 
@@ -448,7 +511,7 @@ const MonthlyReports: React.FC = () => {
         merchant: merchantData[0].merchants,
         periods: merchantData.sort((a, b) => sortMonths(a.monthly_reports.report_month, b.monthly_reports.report_month))
       };
-    });
+    }).sort((a, b) => a.name.localeCompare(b.name));
 
     if (!searchTerm) return list;
 
@@ -517,13 +580,14 @@ const MonthlyReports: React.FC = () => {
     const summaryIds = relevantReports.map(r => r.id);
     
     let allTransactions: any[] = [];
-    const BATCH_SIZE = 100;
+    const BATCH_SIZE = 50;
     for (let i = 0; i < summaryIds.length; i += BATCH_SIZE) {
         const batch = summaryIds.slice(i, i + BATCH_SIZE);
         const { data } = await supabase
           .from('sales_transactions')
           .select('*')
-          .in('summary_id', batch);
+          .in('summary_id', batch)
+          .limit(5000);
         
         if (data) allTransactions = [...allTransactions, ...data];
     }
@@ -951,6 +1015,10 @@ const MonthlyReports: React.FC = () => {
       const totalSales = relevantReports.reduce((acc, r) => acc + n(r.total_sales), 0);
       const totalPayout = relevantReports.reduce((acc, r) => acc + n(r.merchant_payable), 0);
       
+      const notesList = relevantReports
+        .filter(r => remittanceNotes[r.id] && remittanceNotes[r.id].trim() !== '')
+        .map(r => ({ period: r.monthly_reports.report_month, note: remittanceNotes[r.id] }));
+
       const emailHtml = generateEmailHtml({
         merchantName: mInfo.name,
         contactName: mInfo.merchant.contact_name || mInfo.name,
@@ -967,7 +1035,8 @@ const MonthlyReports: React.FC = () => {
         totalSales: `AED ${f(totalSales)}`,
         totalPayout: `AED ${f(totalPayout)}`,
         contractType: mInfo.merchant.contract_type,
-        revenueShare: `${mInfo.merchant.revenue_share_percentage}%`
+        revenueShare: `${mInfo.merchant.revenue_share_percentage}%`,
+        notes: notesList
       });
 
       setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'Payload Ready.', 'Transmitting via Supabase Edge Function...'] }));
@@ -1240,7 +1309,7 @@ const MonthlyReports: React.FC = () => {
           <p className="text-gray-500 mt-1 font-medium">Verified payout intelligence for Powerpod partners.</p>
         </div>
         <div className="flex items-center space-x-3">
-          <button onClick={fetchReports} className="p-3 bg-white border border-gray-100 rounded-2xl text-gray-400 hover:text-blue-600 transition-all shadow-sm">
+          <button onClick={() => fetchReports(true)} className="p-3 bg-white border border-gray-100 rounded-2xl text-gray-400 hover:text-blue-600 transition-all shadow-sm">
             <RefreshCw size={20} className={loading ? 'animate-spin' : ''} />
           </button>
           <div className="relative" ref={monthPickerRef}>
@@ -1393,12 +1462,16 @@ const MonthlyReports: React.FC = () => {
                         <p className="text-xl font-black text-gray-900">{relevantPeriods.reduce((acc, p) => acc + (transactionCounts[p.id] || 0), 0)}</p>
                     </div>
                     <div>
-                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Stripe Fees</p>
-                        <p className="text-xl font-black text-red-500">AED {f(relevantPeriods.reduce((acc, p) => acc + n(p.stripe_fees), 0))}</p>
+                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Venues</p>
+                        <p className="text-xl font-black text-gray-900">
+                            {new Set(relevantPeriods.flatMap(p => venueStats[p.id]?.map(v => v.name) || [])).size}
+                        </p>
                     </div>
                     <div>
-                         <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Gross Sales Tax</p>
-                         <p className="text-xl font-black text-gray-900">AED {f(relevantPeriods.reduce((acc, p) => acc + n(p.tax_amount), 0))}</p>
+                         <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Stations</p>
+                         <p className="text-xl font-black text-gray-900">
+                             {new Set(relevantPeriods.flatMap(p => periodStations[p.id] || [])).size}
+                         </p>
                     </div>
                 </div>
 
