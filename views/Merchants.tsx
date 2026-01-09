@@ -19,7 +19,9 @@ import {
   Percent,
   Banknote,
   Briefcase,
-  AtSign
+  AtSign,
+  MessageSquare,
+  Clock
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Merchant } from '../types';
@@ -29,6 +31,7 @@ const Merchants: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [merchantVenues, setMerchantVenues] = useState<Record<string, {name: string, stationCount: number}[]>>({});
   
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingMerchant, setEditingMerchant] = useState<Merchant | null>(null);
@@ -37,6 +40,48 @@ const Merchants: React.FC = () => {
   useEffect(() => {
     fetchMerchants();
   }, []);
+
+  const fetchMerchantVenues = async (currentMerchants: Merchant[]) => {
+    const mIds = currentMerchants.map(m => m.id);
+    if (mIds.length === 0) return;
+
+    try {
+        const { data, error } = await supabase
+            .from('stations')
+            .select('merchant_id, venue_name, station_identifier')
+            .in('merchant_id', mIds);
+        
+        if (error) {
+            console.error("Error fetching stations:", error);
+            return;
+        }
+
+        if (data) {
+            const stats: Record<string, Record<string, number>> = {};
+            
+            data.forEach(s => {
+                const mId = s.merchant_id;
+                const vName = s.venue_name || 'Unknown Venue';
+                
+                if (!stats[mId]) stats[mId] = {};
+                if (!stats[mId][vName]) stats[mId][vName] = 0;
+                stats[mId][vName]++;
+            });
+
+            const newStats: Record<string, {name: string, stationCount: number}[]> = {};
+            Object.keys(stats).forEach(mId => {
+                newStats[mId] = Object.entries(stats[mId]).map(([name, count]) => ({
+                    name,
+                    stationCount: count
+                })).sort((a, b) => b.stationCount - a.stationCount);
+            });
+            
+            setMerchantVenues(newStats);
+        }
+    } catch (e) {
+        console.error("Error in fetchMerchantVenues", e);
+    }
+  };
 
   const fetchMerchants = async () => {
     setLoading(true);
@@ -48,6 +93,7 @@ const Merchants: React.FC = () => {
 
       if (fetchError) throw fetchError;
       setMerchants(data || []);
+      if (data) fetchMerchantVenues(data);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -78,7 +124,11 @@ const Merchants: React.FC = () => {
           contract_type: editingMerchant.contract_type,
           revenue_share_percentage: editingMerchant.revenue_share_percentage,
           company_name: editingMerchant.company_name,
-          merchant_name: editingMerchant.merchant_name
+          merchant_name: editingMerchant.merchant_name,
+          trn: editingMerchant.trn,
+          reporting_preference: editingMerchant.reporting_preference,
+          notes: editingMerchant.notes,
+          payment_duration: editingMerchant.payment_duration
         })
         .eq('id', editingMerchant.id);
 
@@ -107,20 +157,27 @@ const Merchants: React.FC = () => {
              for (const summary of summaries) {
                 let payable = 0;
                 
-                // Robust Net Sales Calculation: Use stored net_profit or derive it
-                // Net Sales = Gross Sales - Tax
-                // Gross Sales = Total Sales - Stripe Fees
-                const netSales = summary.net_profit ?? (summary.total_sales - summary.stripe_fees - summary.tax_amount);
+                // Calculate Gross Sales (Net Revenue available for split)
+                // Formula: Gross Sales = Actual Fee (Total Sales) - Stripe Fee - Tax
+                const calculatedGrossSales = (summary.total_sales || 0) - (summary.stripe_fees || 0) - (summary.tax_amount || 0);
 
                 if (editingMerchant.contract_type === 'Fixed Charge - Monthly') {
-                   payable = editingMerchant.revenue_share_percentage;
+                   // Fixed Charge: Gross Sales - Monthly Fixed Charge
+                   payable = Math.max(0, calculatedGrossSales - editingMerchant.revenue_share_percentage);
                 } else {
-                   payable = netSales * (editingMerchant.revenue_share_percentage / 100);
+                   // Revenue Share: Gross Sales * Share %
+                   payable = calculatedGrossSales * (editingMerchant.revenue_share_percentage / 100);
                 }
+
+                // Net Income = Gross Sales - Merchant Payout
+                const netIncome = calculatedGrossSales - payable;
 
                 const { error: updateError } = await supabase
                   .from('merchant_period_summaries')
-                  .update({ merchant_payable: payable })
+                  .update({ 
+                      merchant_payable: payable,
+                      net_profit: netIncome 
+                  })
                   .eq('id', summary.id);
                   
                 if (!updateError) updatedCount++;
@@ -202,6 +259,12 @@ const Merchants: React.FC = () => {
                       }`}>
                         {merchant.contract_type || 'Standard'}
                       </span>
+                      {merchant.reporting_preference && (
+                        <span className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center ${merchant.reporting_preference === 'whatsapp' ? 'bg-green-50 text-green-700' : 'bg-orange-50 text-orange-700'}`}>
+                            {merchant.reporting_preference === 'whatsapp' ? <MessageSquare size={12} className="mr-1.5" /> : <Mail size={12} className="mr-1.5" />}
+                            {merchant.reporting_preference}
+                        </span>
+                      )}
                       <button 
                         onClick={() => handleEditClick(merchant)}
                         className="text-gray-300 hover:text-blue-600 p-2 transition-colors"
@@ -232,6 +295,25 @@ const Merchants: React.FC = () => {
                         <span>{merchant.contact_name}</span>
                       </div>
                     )}
+                  </div>
+
+                  <div className="mt-6 pt-6 border-t border-gray-50">
+                      <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3">Active Venues</p>
+                      <div className="space-y-2">
+                          {(!merchantVenues[merchant.id] || merchantVenues[merchant.id].length === 0) ? (
+                              <div className="flex justify-between items-center bg-gray-50 p-3 rounded-xl">
+                                  <span className="text-xs font-bold text-gray-700 truncate max-w-[70%]" title={merchant.merchant_name}>{merchant.merchant_name}</span>
+                                  <span className="text-[10px] font-black text-gray-400 bg-white px-2 py-1 rounded-lg border border-gray-100">1 Venue</span>
+                              </div>
+                          ) : (
+                              merchantVenues[merchant.id].map((v, idx) => (
+                                  <div key={idx} className="flex justify-between items-center bg-gray-50 p-3 rounded-xl">
+                                      <span className="text-xs font-bold text-gray-700 truncate max-w-[70%]" title={v.name}>{v.name}</span>
+                                      <span className="text-[10px] font-black text-gray-400 bg-white px-2 py-1 rounded-lg border border-gray-100">{v.stationCount} Station{v.stationCount !== 1 ? 's' : ''}</span>
+                                  </div>
+                              ))
+                          )}
+                      </div>
                   </div>
                 </div>
 
@@ -310,6 +392,36 @@ const Merchants: React.FC = () => {
                         value={editingMerchant.company_name}
                         onChange={(e) => setEditingMerchant({...editingMerchant, company_name: e.target.value})}
                       />
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">TRN</label>
+                        <input 
+                            type="text"
+                            className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                            value={editingMerchant.trn || ''}
+                            onChange={(e) => setEditingMerchant({...editingMerchant, trn: e.target.value})}
+                        />
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Reporting Preference</label>
+                        <select 
+                            className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                            value={editingMerchant.reporting_preference || ''}
+                            onChange={(e) => setEditingMerchant({...editingMerchant, reporting_preference: e.target.value as 'email' | 'whatsapp'})}
+                        >
+                            <option value="">Select Preference</option>
+                            <option value="email">Email</option>
+                            <option value="whatsapp">WhatsApp</option>
+                        </select>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Notes</label>
+                        <textarea 
+                            className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                            value={editingMerchant.notes || ''}
+                            onChange={(e) => setEditingMerchant({...editingMerchant, notes: e.target.value})}
+                            rows={3}
+                        />
                     </div>
                     <div className="space-y-2">
                       <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Primary Contact Name</label>
@@ -412,6 +524,38 @@ const Merchants: React.FC = () => {
                             value={editingMerchant.revenue_share_percentage}
                             onChange={(e) => setEditingMerchant({...editingMerchant, revenue_share_percentage: Number(e.target.value)})}
                           />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Payment Duration</label>
+                        <div className="space-y-2">
+                            <select 
+                                className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                                value={["Monthly Payout", "Yearly Payout"].includes(editingMerchant.payment_duration || "") ? editingMerchant.payment_duration : "Custom"}
+                                onChange={(e) => {
+                                    const val = e.target.value;
+                                    if (val === "Custom") {
+                                        setEditingMerchant({...editingMerchant, payment_duration: ""});
+                                    } else {
+                                        setEditingMerchant({...editingMerchant, payment_duration: val});
+                                    }
+                                }}
+                            >
+                                <option value="Monthly Payout">Monthly Payout</option>
+                                <option value="Yearly Payout">Yearly Payout</option>
+                                <option value="Custom">Custom</option>
+                            </select>
+                            
+                            {!["Monthly Payout", "Yearly Payout"].includes(editingMerchant.payment_duration || "") && (
+                                <input 
+                                    type="text"
+                                    placeholder="Enter custom duration"
+                                    className="w-full bg-white border-2 border-gray-100 px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                                    value={editingMerchant.payment_duration || ""}
+                                    onChange={(e) => setEditingMerchant({...editingMerchant, payment_duration: e.target.value})}
+                                />
+                            )}
                         </div>
                       </div>
                     </div>

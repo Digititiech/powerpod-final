@@ -1,5 +1,5 @@
       import React, { useState, useEffect } from 'react';
-import { API_BASE_URL } from '../lib/config';
+import { API_BASE_URL, API_KEY } from '../lib/config';
 import { 
   Shield, 
   Globe, 
@@ -17,7 +17,8 @@ import {
   Phone,
   QrCode,
   Smartphone,
-  LogOut
+  LogOut,
+  XCircle
 } from 'lucide-react';
 
 import { supabase } from '../lib/supabase';
@@ -45,6 +46,7 @@ const Settings: React.FC = () => {
   const [waQr, setWaQr] = useState<string | null>(null);
   const [waReady, setWaReady] = useState<boolean>(false);
   const [serverError, setServerError] = useState<boolean>(false);
+  const [connectedNumber, setConnectedNumber] = useState<string | null>(null);
 
   // Poll WhatsApp status
   useEffect(() => {
@@ -52,12 +54,13 @@ const Settings: React.FC = () => {
     if (activeTab === 'whatsapp') {
         const checkStatus = async () => {
             try {
-                const res = await fetch(`${API_BASE_URL}/whatsapp/status`);
+                const res = await fetch(`${API_BASE_URL}/whatsapp-status`, { headers: { 'x-api-key': API_KEY } });
                 if (!res.ok) throw new Error('Server returned ' + res.status);
                 const data = await res.json();
                 setWaStatus(data.status);
                 setWaReady(data.isReady);
                 setWaQr(data.qrCode);
+                setConnectedNumber(data.connectedNumber);
                 setServerError(false);
             } catch (e) {
                 console.error("Failed to fetch WhatsApp status", e);
@@ -91,7 +94,7 @@ const Settings: React.FC = () => {
     if (!confirm('Are you sure you want to disconnect WhatsApp? You will need to scan the QR code again to reconnect.')) return;
     
     try {
-      const res = await fetch(`${API_BASE_URL}/whatsapp/logout`, { method: 'POST' });
+      const res = await fetch(`${API_BASE_URL}/disconnect-whatsapp`, { method: 'POST', headers: { 'x-api-key': API_KEY } });
       const data = await res.json();
       if (data.success) {
         setWaStatus('disconnected');
@@ -106,6 +109,28 @@ const Settings: React.FC = () => {
       alert('Error disconnecting');
     }
   };
+
+  const handleConnect = async (force = false) => {
+    try {
+        setWaStatus('initializing');
+        const url = force ? `${API_BASE_URL}/init-whatsapp?force=true` : `${API_BASE_URL}/init-whatsapp`;
+        const res = await fetch(url, { headers: { 'x-api-key': API_KEY } });
+        const data = await res.json();
+        // UI will update via polling
+    } catch (e) {
+        console.error("Failed to init whatsapp", e);
+        alert("Failed to initialize WhatsApp session");
+    }
+  };
+
+  // Auto-init when entering tab or disconnected
+  useEffect(() => {
+    // Only auto-connect if we are strictly disconnected AND not already initializing/connecting
+    if (activeTab === 'whatsapp' && waStatus === 'disconnected' && !serverError) {
+        // Double check we aren't already polling or processing
+        handleConnect();
+    }
+  }, [activeTab]); // Removed waStatus dependency to prevent loop
 
   const handleSave = () => {
     setIsSaving(true);
@@ -269,80 +294,97 @@ const Settings: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-xl font-black text-gray-900">WhatsApp Gateway</h3>
-                  <p className="text-xs text-gray-400 font-bold uppercase tracking-widest mt-1">Connect your WhatsApp Business</p>
+                  <p className="text-xs text-gray-400 font-bold uppercase tracking-widest mt-1">Baileys MD Protocol</p>
                 </div>
               </div>
 
               <div className="flex flex-col items-center justify-center space-y-6">
-                 {serverError ? (
-                     <div className="flex flex-col items-center text-center p-8 bg-red-50 rounded-3xl w-full border border-red-100">
-                         <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mb-4">
-                             <Server size={32} />
-                         </div>
-                         <h3 className="text-lg font-black text-red-800">Backend Offline</h3>
-                         <p className="text-red-600 font-medium text-sm mt-2">The WhatsApp gateway server is not running.</p>
-                         <p className="text-red-400 text-xs mt-4">Please ensure 'npm run server' is executing in the terminal.</p>
-                     </div>
-                 ) : waStatus === 'ready' || waStatus === 'authenticated' ? (
-                     <div className="flex flex-col items-center text-center p-8 bg-green-50 rounded-3xl w-full">
-                         <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-4">
-                             <CheckCircle2 size={32} />
-                         </div>
-                         <h3 className="text-lg font-black text-green-800">WhatsApp Connected</h3>
-                         <p className="text-green-600 font-medium text-sm mt-2">Ready to send reports via WhatsApp.</p>
-                         
-                         <button 
-                            onClick={handleDisconnectWhatsApp}
-                            className="mt-6 px-6 py-3 bg-red-100 text-red-600 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-red-200 transition-all flex items-center space-x-2"
-                         >
-                           <LogOut size={14} />
-                           <span>Delete Connection</span>
-                         </button>
-                     </div>
-                 ) : (
-                     <div className="flex flex-col items-center text-center w-full">
-                         {waQr ? (
-                             <div className="bg-white p-4 rounded-xl border-2 border-dashed border-gray-200 shadow-sm relative group">
-                                 <img src={waQr} alt="WhatsApp QR Code" className="w-64 h-64" />
-                                 <div className="absolute inset-0 bg-white/80 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm rounded-xl">
-                                     <p className="text-gray-900 font-bold text-xs uppercase tracking-widest">Scan with WhatsApp</p>
-                                 </div>
-                             </div>
-                         ) : (
-                             <div className="w-64 h-64 bg-gray-100 rounded-xl flex items-center justify-center text-gray-400 animate-pulse">
-                                 <QrCode size={48} />
-                                 <span className="ml-2 text-xs font-bold uppercase">Loading QR...</span>
-                             </div>
-                         )}
-                         <div className="mt-6 max-w-md">
-                             <h4 className="text-sm font-black text-gray-900 uppercase tracking-widest mb-2">Scan to Connect</h4>
-                             <ol className="text-xs text-gray-500 font-medium text-left space-y-2 list-decimal pl-4">
-                                 <li>Open WhatsApp on your phone</li>
-                                 <li>Tap Menu or Settings and select <b>Linked Devices</b></li>
-                                 <li>Tap on <b>Link a Device</b></li>
-                                 <li>Point your phone to this screen to capture the code</li>
-                             </ol>
-                         </div>
-                         
-                         {/* Emergency Reset Button for Stuck States */}
-                         <button 
-                            onClick={handleDisconnectWhatsApp}
-                            className="mt-8 text-gray-400 hover:text-red-500 text-[10px] font-bold uppercase tracking-widest transition-colors flex items-center space-x-1"
-                         >
-                           <RefreshCw size={10} />
-                           <span>Reset / Restart Session</span>
-                         </button>
-                     </div>
-                 )}
-                 <div className="bg-green-50/30 p-8 rounded-3xl border border-green-50 flex items-start space-x-6 w-full">
-                    <Smartphone className="text-green-600 shrink-0 mt-1" size={24} />
-                    <div>
-                        <h4 className="text-[10px] font-black text-green-700 uppercase tracking-widest mb-1">Device Integration</h4>
-                        <p className="text-xs font-bold text-green-900 leading-relaxed">
-                            Using Baileys-based WhatsApp Web API implementation. Ensure the server has a stable internet connection.
-                        </p>
+                {serverError ? (
+                    <div className="flex flex-col items-center text-center p-8 bg-red-50 rounded-3xl w-full border border-red-100">
+                        <AlertTriangle className="text-red-500 mb-2" size={32} />
+                        <h3 className="text-lg font-black text-red-800">Backend Offline</h3>
+                        <p className="text-red-600 font-medium text-sm mt-2">The local backend server is not reachable.</p>
+                        <p className="text-red-500/70 text-xs mt-4 font-mono">Check connection to {API_BASE_URL}</p>
                     </div>
-                 </div>
+                ) : waStatus === 'connected' ? (
+                   <div className="flex flex-col items-center text-center p-8 bg-green-50 rounded-3xl w-full border border-green-100">
+                       <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-4">
+                           <CheckCircle2 size={32} />
+                       </div>
+                       <h3 className="text-lg font-black text-green-800">Gateway Active</h3>
+                       <p className="text-green-600 font-medium text-sm mt-2">WhatsApp is connected and ready to dispatch reports.</p>
+                       
+                       {connectedNumber && (
+                           <div className="mt-4 px-4 py-2 bg-white/50 border border-green-200 rounded-xl flex items-center space-x-2 animate-in fade-in slide-in-from-bottom-2">
+                               <Smartphone size={14} className="text-green-600" />
+                               <span className="text-xs font-bold text-green-700 font-mono">+{connectedNumber}</span>
+                           </div>
+                       )}
+
+                       <p className="text-green-500/70 text-xs mt-4 font-mono">Session ID: ACTIVE</p>
+                       
+                       <button 
+                         onClick={handleDisconnectWhatsApp}
+                         className="mt-6 px-6 py-3 bg-white border-2 border-green-200 text-green-700 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-red-50 hover:border-red-200 hover:text-red-600 transition-all flex items-center space-x-2"
+                       >
+                         <LogOut size={14} />
+                         <span>Disconnect Device</span>
+                       </button>
+                   </div>
+                ) : (waStatus === 'connecting' || waStatus === 'initializing') ? (
+                    <div className="flex flex-col items-center text-center p-8">
+                        <div className="w-16 h-16 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mb-4 animate-pulse">
+                            <RefreshCw size={32} className="animate-spin" />
+                        </div>
+                        <h3 className="text-lg font-black text-gray-900">Initializing Gateway</h3>
+                        <p className="text-gray-400 font-medium text-sm mt-2 max-w-xs">Establishing secure connection to WhatsApp...</p>
+                        
+                        <button 
+                            onClick={handleDisconnectWhatsApp} 
+                            className="mt-6 px-4 py-2 bg-white border border-gray-200 rounded-lg text-xs text-red-500 hover:bg-red-50 font-bold flex items-center space-x-2 transition-all"
+                        >
+                            <XCircle size={14} />
+                            <span>Cancel & Reset</span>
+                        </button>
+                    </div>
+                ) : waQr ? (
+                    <div className="flex flex-col items-center bg-gray-50 p-8 rounded-3xl border border-gray-100">
+                        <div className="bg-white p-4 rounded-2xl shadow-sm mb-6">
+                            <img src={waQr} alt="WhatsApp QR Code" className="w-64 h-64 object-contain mix-blend-multiply" />
+                        </div>
+                        <h3 className="text-lg font-black text-gray-900">Scan to Connect</h3>
+                        <p className="text-gray-400 font-medium text-xs mt-2 max-w-xs text-center mb-6">Open WhatsApp on your phone, go to Linked Devices, and scan this code.</p>
+                        
+                        <div className="flex items-center space-x-2 text-xs font-bold text-gray-400 bg-gray-50 px-4 py-2 rounded-lg">
+                           <RefreshCw size={14} className="animate-spin" />
+                           <span>Waiting for device...</span>
+                        </div>
+
+                        <button 
+                           onClick={() => handleConnect(true)}
+                           className="mt-6 text-xs text-blue-500 hover:text-blue-700 font-bold underline decoration-2 underline-offset-4 transition-all flex items-center space-x-2"
+                        >
+                           <RefreshCw size={12} />
+                           <span>Regenerate QR Code</span>
+                        </button>
+                    </div>
+                ) : (
+                    <div className="flex flex-col items-center text-center p-8">
+                        <div className="w-16 h-16 bg-gray-50 text-gray-400 rounded-full flex items-center justify-center mb-4">
+                            <Smartphone size={32} />
+                        </div>
+                        <h3 className="text-lg font-black text-gray-900">Device Not Connected</h3>
+                        <p className="text-gray-400 font-medium text-sm mt-2 max-w-xs">Generate a new QR code to link your device.</p>
+                        
+                        <button 
+                            onClick={() => handleConnect(true)} 
+                            className="mt-6 px-10 py-4 bg-green-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-green-700 transition-all shadow-xl shadow-green-500/20 active:scale-95 flex items-center space-x-3"
+                        >
+                            <Smartphone size={16} />
+                            <span>Generate QR Code</span>
+                        </button>
+                    </div>
+                )}
               </div>
             </div>
           )}
@@ -386,8 +428,8 @@ const Settings: React.FC = () => {
               <div className="flex justify-between items-center p-4 bg-white/5 rounded-2xl">
                 <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">WhatsApp Link</span>
                 <span className="text-[9px] font-black text-green-500 uppercase flex items-center">
-                  <span className={`w-1.5 h-1.5 ${waStatus === 'ready' ? 'bg-green-500' : 'bg-red-500'} rounded-full mr-2 animate-pulse`}></span>
-                  {waStatus === 'ready' ? 'Active' : 'Inactive'}
+                  <span className={`w-1.5 h-1.5 ${waStatus === 'connected' ? 'bg-green-500' : 'bg-red-500'} rounded-full mr-2 animate-pulse`}></span>
+                  {waStatus === 'connected' ? 'Active' : 'Inactive'}
                 </span>
               </div>
               <div className="flex justify-between items-center p-4 bg-white/5 rounded-2xl">

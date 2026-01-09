@@ -154,11 +154,21 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const fetchDashboardData = async () => {
     setLoading(true);
     try {
-      // 1. Build Query for Summaries based on payment status and months
+      // 1. Fetch Merchants for Contract Logic
+      const { data: merchantsData } = await supabase
+        .from('merchants')
+        .select('id, revenue_share_percentage, contract_type');
+      
+      const merchantContractMap = new Map(merchantsData?.map((m: any) => [m.id, m]) || []);
+
+      // 2. Build Query for Summaries (to get IDs and status)
       let summaryQuery = supabase
         .from('merchant_period_summaries')
         .select(`
-          *,
+          id,
+          merchant_id,
+          is_paid,
+          merchant_payable,
           monthly_reports!inner (report_month),
           merchants!inner (merchant_name, company_name)
         `);
@@ -171,15 +181,89 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       }
 
       const { data: summaries } = await summaryQuery;
-
-      // 2. Fetch Master Counts
+      
+      // 3. Fetch Master Counts
       const { count: mCount } = await supabase.from('merchants').select('*', { count: 'exact', head: true });
       const { count: sCount } = await supabase.from('stations').select('*', { count: 'exact', head: true });
 
-      // 3. Aggregate Stats
-      const totalRevenue = summaries?.reduce((acc, r) => acc + n(r.total_sales), 0) || 0;
-      const totalProfit = summaries?.reduce((acc, r) => acc + n(r.net_profit), 0) || 0;
-      const totalPending = summaries?.filter(s => !s.is_paid).reduce((acc, r) => acc + n(r.merchant_payable), 0) || 0;
+      let totalRevenue = 0;
+      let totalProfit = 0;
+      let totalPending = 0;
+      let rankingMap = new Map();
+
+      if (summaries && summaries.length > 0) {
+          const summaryIds = summaries.map((s: any) => s.id);
+          const summaryStatus = new Map(summaries.map((s: any) => [s.id, { 
+              merchant_id: s.merchant_id, 
+              is_paid: s.is_paid,
+              original_payable: s.merchant_payable,
+              merchant_info: s.merchants
+          }]));
+
+          // Fetch Transactions in Batches
+          let transactions: any[] = [];
+          const batchSize = 50;
+          for (let i = 0; i < summaryIds.length; i += batchSize) {
+              const batch = summaryIds.slice(i, i + batchSize);
+              const { data: txBatch } = await supabase
+                  .from('sales_transactions')
+                  .select('amount, stripe_fee, tax_fee, summary_id')
+                  .in('summary_id', batch);
+              
+              if (txBatch) transactions = transactions.concat(txBatch);
+          }
+
+          // Calculate Stats from Transactions
+          const fixedChargesAdded = new Set<string>();
+
+          transactions.forEach(tx => {
+              const summary = summaryStatus.get(tx.summary_id);
+              if (!summary) return;
+
+              const amount = n(tx.amount);
+              const stripe = n(tx.stripe_fee);
+              const tax = n(tx.tax_fee);
+              const net = amount - stripe - tax;
+
+              totalRevenue += amount;
+              totalProfit += net;
+
+              // Calculate Payable
+              const merchant = merchantContractMap.get(summary.merchant_id);
+              if (merchant && !summary.is_paid) {
+                  if (merchant.contract_type === 'Fixed Charge - Monthly') {
+                      if (!fixedChargesAdded.has(tx.summary_id)) {
+                          totalPending += n(summary.original_payable);
+                          fixedChargesAdded.add(tx.summary_id);
+                      }
+                  } else {
+                      const share = n(merchant.revenue_share_percentage);
+                      totalPending += net * (share / 100);
+                  }
+              }
+
+              // Update Ranking
+              const mId = summary.merchant_id;
+              const existing = rankingMap.get(mId) || { 
+                name: summary.merchant_info.merchant_name, 
+                company: summary.merchant_info.company_name, 
+                sales: 0 
+              };
+              existing.sales += amount;
+              rankingMap.set(mId, existing);
+          });
+
+          // Add Fixed Charges for summaries with NO transactions (if any)
+          summaries.forEach((s: any) => {
+              const merchant = merchantContractMap.get(s.merchant_id);
+              if (merchant && !s.is_paid && merchant.contract_type === 'Fixed Charge - Monthly') {
+                 if (!fixedChargesAdded.has(s.id)) {
+                     totalPending += n(s.merchant_payable);
+                     fixedChargesAdded.add(s.id);
+                 }
+              }
+          });
+      }
 
       setStats({
         revenue: totalRevenue,
@@ -195,48 +279,35 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         .select('report_month, total_sales')
         .order('report_month', { ascending: true });
 
-      const filteredReports = reports?.filter(r => {
+      const filteredReports = reports?.filter((r: any) => {
         if (!r.report_month) return false;
         const lower = r.report_month.toLowerCase();
         return lower !== 'parsed period' && !lower.includes('pending') && !lower.includes('audit');
       }) || [];
 
       // Sort reports chronologically
-      const sortedReports = filteredReports.sort((a, b) => {
+      const sortedReports = filteredReports.sort((a: any, b: any) => {
         return parseMonthYear(a.report_month) - parseMonthYear(b.report_month);
       });
 
-      setChartData(sortedReports.map(r => ({
+      setChartData(sortedReports.map((r: any) => ({
         name: r.report_month,
         sales: r.total_sales
       })));
 
       // 5. Top Merchants (Ranking)
-      if (summaries) {
-        const merchantMap = new Map();
-        summaries.forEach(s => {
-          const mId = s.merchant_id;
-          const existing = merchantMap.get(mId) || { 
-            name: s.merchants.merchant_name, 
-            company: s.merchants.company_name, 
-            sales: 0 
-          };
-          existing.sales += n(s.total_sales);
-          merchantMap.set(mId, existing);
-        });
+      const sorted = Array.from(rankingMap.values())
+        .sort((a: any, b: any) => b.sales - a.sales)
+        .slice(0, 5);
 
-        const sorted = Array.from(merchantMap.values())
-          .sort((a, b) => b.sales - a.sales)
-          .slice(0, 5);
+      const maxSales = Math.max(...sorted.map((m: any) => m.sales), 1);
+      setTopMerchants(sorted.map((m: any) => ({
+        venue: m.name,
+        merchant: m.company,
+        sales: m.sales,
+        progress: (m.sales / maxSales) * 100
+      })));
 
-        const maxSales = Math.max(...sorted.map(m => m.sales), 1);
-        setTopMerchants(sorted.map(m => ({
-          venue: m.name,
-          merchant: m.company,
-          sales: m.sales,
-          progress: (m.sales / maxSales) * 100
-        })));
-      }
     } catch (err) {
       console.error('Dashboard Load Error:', err);
     } finally {

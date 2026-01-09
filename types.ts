@@ -24,6 +24,10 @@ export interface Merchant {
   iban: string;
   contract_type: string;
   revenue_share_percentage: number;
+  trn?: string;
+  reporting_preference?: 'email' | 'whatsapp';
+  payment_duration?: string;
+  notes?: string;
   status?: string;
   created_at: string;
   updated_at: string;

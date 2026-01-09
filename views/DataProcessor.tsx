@@ -162,10 +162,12 @@ const DataProcessor: React.FC = () => {
             const venueKey = getFuzzyKey(row, ['rental', 'venue']);
             const amountKey = getFuzzyKey(row, ['actual', 'fee']);
             const timeKey = getFuzzyKey(row, ['rental', 'time']);
+            const stationKey = getFuzzyKey(row, ['rental', 'station']) || getFuzzyKey(row, ['station', 'name']);
             
             const rentalVenue = sanitizeValue(row[venueKey || '']);
             const rawDate = sanitizeValue(row[timeKey || '']);
             const amount = parseFloat(sanitizeValue(row[amountKey || '']).replace(/[^0-9.-]/g, '')) || 0;
+            const station = sanitizeValue(row[stationKey || '']);
             const merchant = extractMerchant(rentalVenue);
             const period = parsePeriod(rawDate);
             
@@ -175,6 +177,7 @@ const DataProcessor: React.FC = () => {
               'Stripe Fees': Number(calculateStripeFee(amount).toFixed(2)),
               'Report Month': period,
               '_normalizedVenue': rentalVenue,
+              '_normalizedStation': station,
               '_rawAmount': amount,
               '_rawDate': rawDate
             });

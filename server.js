@@ -2,11 +2,11 @@ import express from 'express';
 import nodemailer from 'nodemailer';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pino from 'pino';
-import qrcode from 'qrcode';
+import QRCode from 'qrcode';
 import fs from 'fs';
-import path from 'path';
+import helmet from 'helmet';
 
 // Load environment variables
 dotenv.config();
@@ -14,22 +14,45 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Security Middleware
+app.use(helmet());
+
 // Middleware
 const allowedOrigins = [
   'http://localhost:3000',
-  'https://webapp.powerpod.ae'
+  'https://webapp.powerpod.ae',
+  'http://185.203.118.30:3001',
+  'https://api.powerpod.ae'
 ];
 app.use(cors({
-  origin: allowedOrigins,
+  origin: true, // Allow all for now or restrict to allowedOrigins
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-  credentials: false
+  allowedHeaders: ['Content-Type', 'x-api-key'],
+  credentials: true
 }));
 app.use(express.json({ limit: '50mb' }));
 
+// Auth Middleware
+const API_SECRET = process.env.API_SECRET_KEY;
+console.log(`Security: API Key Protection is ${API_SECRET ? 'ENABLED' : 'DISABLED'}`);
+
+const authMiddleware = (req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  
+  // If no secret is set, allow all (or block all? better allow for backward compat if env fails)
+  if (!API_SECRET) return next();
+
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey || apiKey !== API_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized Access' });
+  }
+  next();
+};
+
+// Apply Auth to API routes
+app.use('/api', authMiddleware);
+
 // --- Nodemailer Setup ---
-// SMTP credentials should be managed via Supabase Edge Functions for production security.
-// This local setup is optional and will only initialize if keys are present.
 let transporter = null;
 if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
   transporter = nodemailer.createTransport({
@@ -53,118 +76,207 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
   console.log('SMTP configuration missing. Email dispatch via local server is disabled.');
 }
 
-// --- WhatsApp Setup (Baileys) ---
-const AUTH_DIR = 'auth_info_baileys';
-let sock;
-let qrCodeData = null;
-let connectionStatus = 'disconnected'; // disconnected, connecting, connected, qr_ready
-let isReady = false;
+// --- WhatsApp Baileys Setup ---
+let sock = null;
+let qrCode = null;
+let connectionStatus = 'disconnected'; // disconnected, connecting, connected
+let shouldReconnect = true;
 
-// Ensure auth directory exists (or will be created by Baileys)
-// We don't need to manually create it, Baileys does it.
+const logger = pino({ level: 'silent' }); // Use 'debug' for troubleshooting
 
-const initializeWhatsApp = async () => {
-    try {
-        console.log('Initializing WhatsApp Client...');
-        connectionStatus = 'connecting';
-        isReady = false;
+// Debug Logging
+const debugLogs = [];
+function logDebug(msg) {
+    const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+    const logEntry = `[${timestamp}] ${msg}`;
+    console.log(logEntry);
+    debugLogs.push(logEntry);
+    if (debugLogs.length > 50) debugLogs.shift();
+}
 
-        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+async function initWhatsApp() {
+  if (sock && (connectionStatus === 'connected' || connectionStatus === 'connecting')) {
+      logDebug('Skipping init: WhatsApp already initializing or connected');
+      return;
+  }
+  
+  logDebug('Starting WhatsApp initialization...');
+  connectionStatus = 'connecting';
+  
+  // Safety timeout: Reset if stuck in connecting for too long
+  setTimeout(() => {
+      if (connectionStatus === 'connecting') {
+          logDebug('Connection timed out (40s), resetting...');
+          if (sock) {
+              try { sock.end(undefined); } catch (e) {}
+              sock = null;
+          }
+          connectionStatus = 'disconnected';
+      }
+  }, 40000);
 
-        sock = makeWASocket({
-            auth: state,
-            logger: pino({ level: 'silent' }), // Reduce noise
-            browser: ['Powerpod Merchant', 'Chrome', '1.0.0'],
-            connectTimeoutMs: 60000,
-        });
+  try {
+      const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+      const { version, isLatest } = await fetchLatestBaileysVersion();
+      logDebug(`using WA v${version.join('.')}, isLatest: ${isLatest}`);
 
-        sock.ev.on('creds.update', saveCreds);
+      sock = makeWASocket({
+        version,
+        auth: state,
+        logger,
+        browser: Browsers.macOS('Chrome'),
+        printQRInTerminal: false,
+        connectTimeoutMs: 60000,
+        syncFullHistory: false
+      });
 
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+      sock.ev.on('creds.update', saveCreds);
 
-            if (qr) {
-                console.log('QR Code received');
-                try {
-                    qrCodeData = await qrcode.toDataURL(qr);
-                    connectionStatus = 'qr_ready';
-                    isReady = false;
-                } catch (err) {
-                    console.error('Failed to generate QR code data URL:', err);
-                }
-            }
+      sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        logDebug(`Connection update: ${connection || 'undefined'}, hasQr: ${!!qr}`);
 
-            if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log('Connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
-                
-                connectionStatus = 'disconnected';
-                isReady = false;
-                qrCodeData = null;
-
-                if (shouldReconnect) {
-                    setTimeout(initializeWhatsApp, 3000);
-                } else {
-                    console.log('Logged out. Cleaning up session...');
-                    await cleanupSession();
-                    // Don't auto-reconnect immediately after logout to prevent loops, 
-                    // but we can start a fresh session setup.
-                    setTimeout(initializeWhatsApp, 3000); 
-                }
-            } else if (connection === 'open') {
-                console.log('WhatsApp connection opened!');
-                connectionStatus = 'connected';
-                isReady = true;
-                qrCodeData = null;
-            } else if (connection === 'connecting') {
-                connectionStatus = 'connecting';
-                isReady = false;
-            }
-        });
-
-    } catch (err) {
-        console.error('Failed to initialize WhatsApp:', err);
-        connectionStatus = 'disconnected';
-        setTimeout(initializeWhatsApp, 5000);
-    }
-};
-
-const cleanupSession = async () => {
-    try {
-        if (sock) {
-            sock.end(undefined);
-            sock = undefined;
+        if (qr) {
+          qrCode = await QRCode.toDataURL(qr);
+          connectionStatus = 'qr_ready';
+          logDebug('QR Code generated');
         }
-        
-        // Wait a bit for file locks to release
-        await new Promise(resolve => setTimeout(resolve, 1000));
 
-        if (fs.existsSync(AUTH_DIR)) {
-            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-            console.log('Session directory removed.');
+        if (connection === 'close') {
+          const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+          const shouldReconnectLocal = statusCode !== DisconnectReason.loggedOut;
+          
+          // Handle specific disconnect reasons
+          if (statusCode === 440) { // DisconnectReason.connectionReplaced
+              logDebug('Connection Replaced (Another session active). Stopping auto-reconnect.');
+              connectionStatus = 'disconnected';
+              shouldReconnect = false;
+              return;
+          }
+
+          logDebug(`Connection closed: ${statusCode}, reconnecting: ${shouldReconnectLocal}`);
+          connectionStatus = 'disconnected';
+          qrCode = null;
+          
+          if (shouldReconnectLocal && shouldReconnect) {
+            // Add delay to prevent tight loops and allow cleanup
+            logDebug('Reconnecting in 3 seconds...');
+            setTimeout(() => {
+                initWhatsApp();
+            }, 3000);
+          } else {
+            logDebug(`Logged out/Stopped. Code: ${statusCode}`);
+          }
+        } else if (connection === 'open') {
+          logDebug('WhatsApp connection opened');
+          connectionStatus = 'connected';
+          qrCode = null;
         }
-    } catch (err) {
-        console.error('Error during cleanup:', err);
-    }
-};
+      });
+  } catch (e) {
+      logDebug(`Init failed: ${e.message}`);
+      connectionStatus = 'disconnected';
+  }
+}
 
-// Start WhatsApp
-initializeWhatsApp();
+// Auto-init on startup if session exists
+if (fs.existsSync('auth_info_baileys')) {
+    console.log('Found existing session, initializing WhatsApp...');
+    initWhatsApp();
+}
 
 // --- Endpoints ---
 
 // Root health
 app.get('/', (req, res) => {
-  res.json({ status: true, message: 'WhatsApp API is running', timestamp: new Date().toISOString() });
+  res.json({ status: true, message: 'PowerPod Backend API is running', timestamp: new Date().toISOString() });
 });
 
-// /api health (for reverse proxy checks)
 app.get('/api', (req, res) => {
-  res.json({ status: true, message: 'WhatsApp API is running', timestamp: new Date().toISOString() });
+    res.json({ status: true, message: 'PowerPod Backend API is running' });
 });
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', whatsapp: connectionStatus });
+    res.json({ status: 'ok' });
+});
+
+// WhatsApp Endpoints
+app.get('/api/init-whatsapp', async (req, res) => {
+    const force = req.query.force === 'true';
+    shouldReconnect = true;
+    
+    if (!force && connectionStatus === 'connected') {
+        return res.json({ status: 'connected' });
+    }
+    
+    if (force) {
+        logDebug('Forcing re-initialization...');
+        if (sock) {
+            try { sock.end(undefined); } catch (e) {}
+            sock = null;
+        }
+        connectionStatus = 'disconnected';
+    }
+
+    await initWhatsApp();
+    res.json({ status: 'initializing', message: 'WhatsApp initialization started' });
+});
+
+app.get('/api/whatsapp-status', (req, res) => {
+    const user = sock?.user;
+    const connectedNumber = user ? user.id.split(':')[0] : null;
+    res.json({ 
+        status: connectionStatus, 
+        qrCode: connectionStatus === 'qr_ready' ? qrCode : null,
+        connectedNumber,
+        logs: debugLogs.slice(-20) // Send last 20 logs for debugging
+    });
+});
+
+app.post('/api/disconnect-whatsapp', async (req, res) => {
+    shouldReconnect = false;
+    try {
+        if (sock) {
+            try { await sock.logout(); } catch (e) { console.error('Logout failed:', e); }
+            try { sock.end(undefined); } catch (e) {}
+            sock = null;
+        }
+        
+        // Wait for file handles to release
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        if (fs.existsSync('auth_info_baileys')) {
+            fs.rmSync('auth_info_baileys', { recursive: true, force: true });
+        }
+        connectionStatus = 'disconnected';
+        qrCode = null;
+        res.json({ success: true, message: 'Disconnected successfully' });
+    } catch (error) {
+        console.error('Error disconnecting:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/send-whatsapp', async (req, res) => {
+    try {
+        const { number, message } = req.body;
+        
+        if (connectionStatus !== 'connected' || !sock) {
+            return res.status(400).json({ error: 'WhatsApp not connected' });
+        }
+
+        // Format number: remove non-digits, ensure suffix
+        let formattedNumber = number.replace(/\D/g, '');
+        if (!formattedNumber.endsWith('@s.whatsapp.net')) {
+            formattedNumber += '@s.whatsapp.net';
+        }
+
+        const sentMsg = await sock.sendMessage(formattedNumber, { text: message });
+        res.json({ success: true, data: sentMsg });
+    } catch (error) {
+        console.error('Error sending WhatsApp message:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // Send Email
@@ -188,127 +300,6 @@ app.post('/api/send-email', async (req, res) => {
     } catch (error) {
         console.error('Error sending email:', error);
         res.status(500).json({ error: error.message });
-    }
-});
-
-// WhatsApp Status
-app.get('/api/whatsapp/status', (req, res) => {
-    res.json({
-        status: isReady ? 'ready' : (connectionStatus === 'qr_ready' ? 'qr_ready' : connectionStatus),
-        isReady: isReady,
-        qrCode: qrCodeData
-    });
-});
-
-// Alias without /api prefix (for proxies that strip /api)
-app.get('/whatsapp/status', (req, res) => {
-  res.json({
-      status: isReady ? 'ready' : (connectionStatus === 'qr_ready' ? 'qr_ready' : connectionStatus),
-      isReady: isReady,
-      qrCode: qrCodeData
-  });
-});
-
-// WhatsApp Send
-app.post('/api/send-whatsapp', async (req, res) => {
-    if (!isReady || !sock) {
-        return res.status(503).json({ error: 'WhatsApp is not connected. Please scan QR code in Settings.' });
-    }
-
-    const { to, message, file } = req.body;
-    if (!to) return res.status(400).json({ error: 'Missing recipient number' });
-
-    try {
-        let jid = to.replace(/\D/g, '');
-        if (!jid.includes('@')) jid = `${jid}@s.whatsapp.net`;
-
-        if (file) {
-            const base64Data = file.data.split(',')[1] || file.data;
-            const buffer = Buffer.from(base64Data, 'base64');
-            await sock.sendMessage(jid, {
-                document: buffer,
-                mimetype: file.mimetype,
-                fileName: file.filename,
-                caption: message
-            });
-        } else {
-            await sock.sendMessage(jid, { text: message });
-        }
-        res.json({ success: true });
-    } catch (error) {
-        console.error('Error sending message:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Alias without /api prefix
-app.post('/send-whatsapp', async (req, res) => {
-    if (!isReady || !sock) {
-        return res.status(503).json({ error: 'WhatsApp is not connected. Please scan QR code in Settings.' });
-    }
-
-    const { to, message, file } = req.body;
-    if (!to) return res.status(400).json({ error: 'Missing recipient number' });
-
-    try {
-        let jid = to.replace(/\D/g, '');
-        if (!jid.includes('@')) jid = `${jid}@s.whatsapp.net`;
-
-        if (file) {
-            const base64Data = file.data.split(',')[1] || file.data;
-            const buffer = Buffer.from(base64Data, 'base64');
-            await sock.sendMessage(jid, {
-                document: buffer,
-                mimetype: file.mimetype,
-                fileName: file.filename,
-                caption: message
-            });
-        } else {
-            await sock.sendMessage(jid, { text: message });
-        }
-        res.json({ success: true });
-    } catch (error) {
-        console.error('Error sending message:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// WhatsApp Logout
-app.all('/api/whatsapp/logout', async (req, res) => {
-    console.log('Logout requested');
-    try {
-        if (sock) {
-            await sock.logout(); // This should trigger connection.close with loggedOut reason
-        } else {
-            await cleanupSession();
-            initializeWhatsApp();
-        }
-        res.json({ success: true });
-    } catch (error) {
-        console.error('Logout error:', error);
-        // Force cleanup if logout fails
-        await cleanupSession();
-        initializeWhatsApp();
-        res.json({ success: true, note: 'Forced cleanup performed' });
-    }
-});
-
-// Alias without /api prefix
-app.all('/whatsapp/logout', async (req, res) => {
-    console.log('Logout requested');
-    try {
-        if (sock) {
-            await sock.logout();
-        } else {
-            await cleanupSession();
-            initializeWhatsApp();
-        }
-        res.json({ success: true });
-    } catch (error) {
-        console.error('Logout error:', error);
-        await cleanupSession();
-        initializeWhatsApp();
-        res.json({ success: true, note: 'Forced cleanup performed' });
     }
 });
 

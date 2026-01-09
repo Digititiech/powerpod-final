@@ -333,68 +333,208 @@ const Transactions: React.FC = () => {
     // Visual feedback handled in render
   };
 
+  const resyncSummaries = async (summaryIds: Set<string>) => {
+    if (summaryIds.size === 0) return;
+    
+    console.log(`Resyncing ${summaryIds.size} summaries...`);
+    const ids = Array.from(summaryIds);
+    
+    // Process in batches
+    for (let i = 0; i < ids.length; i += 20) {
+      const batch = ids.slice(i, i + 20);
+      
+      // 1. Fetch current totals from transactions
+      // Note: We need to group by summary_id manually since Supabase doesn't support group by in client easily
+      // So we fetch all transactions for these summaries
+      const { data: txs, error } = await supabase
+        .from('sales_transactions')
+        .select('summary_id, amount, stripe_fee, tax_fee')
+        .in('summary_id', batch);
+
+      if (error) {
+        console.error('Resync fetch error:', error);
+        continue;
+      }
+
+      // 2. Aggregate in memory
+      const aggMap = new Map<string, { sales: number, stripe: number, tax: number, net: number }>();
+      
+      // Initialize with 0 for all requested summaries (in case they have 0 transactions left)
+      batch.forEach(id => aggMap.set(id, { sales: 0, stripe: 0, tax: 0, net: 0 }));
+
+      txs?.forEach(tx => {
+        const curr = aggMap.get(tx.summary_id)!;
+        const amount = Number(tx.amount) || 0;
+        const stripe = Number(tx.stripe_fee) || 0;
+        const tax = Number(tx.tax_fee) || 0;
+        
+        curr.sales += amount;
+        curr.stripe += stripe;
+        curr.tax += tax;
+        curr.net += (amount - stripe - tax);
+      });
+
+      // 3. Update Summaries and Calculate Payable
+      for (const [sId, totals] of aggMap.entries()) {
+        // Fetch merchant contract info first
+        const { data: summary } = await supabase
+          .from('merchant_period_summaries')
+          .select('merchant_id, merchants(revenue_share_percentage, contract_type)')
+          .eq('id', sId)
+          .single();
+          
+        if (summary) {
+          let payable = 0;
+          const m = summary.merchants;
+          // @ts-ignore
+          if (m.contract_type === 'Fixed Charge - Monthly') {
+            // @ts-ignore
+             payable = m.revenue_share_percentage; // Fixed charge remains constant
+          } else {
+             // @ts-ignore
+             payable = totals.net * (m.revenue_share_percentage / 100);
+          }
+
+          await supabase
+            .from('merchant_period_summaries')
+            .update({
+              total_sales: totals.sales,
+              stripe_fees: totals.stripe,
+              tax_amount: totals.tax,
+              net_profit: totals.net,
+              merchant_payable: payable
+            })
+            .eq('id', sId);
+        }
+      }
+    }
+    console.log('Resync complete.');
+  };
+
   const handleBulkDelete = async () => {
     if (!window.confirm(`Are you sure you want to delete ${selectAllMatching ? totalCount : selectedIds.size} transactions? This action cannot be undone.`)) return;
     
     setProcessingBulk(true);
     try {
       let error;
+      const affectedSummaryIds = new Set<string>();
       
       if (selectAllMatching) {
-        // Delete based on filters
-        // Note: Supabase delete with joins is tricky. Usually requires subquery or multiple steps.
-        // Simplest safe way for "delete all matching filters" is to fetch IDs then delete in batches if many, 
-        // or use a Postgres function. 
-        // However, standard PostgREST allows filtering on the delete directly if it's on the main table.
-        // But our filters involve joined tables (merchant name, report month).
-        // Strategy: Fetch IDs of all matching, then delete.
+        // Delete ALL matching transactions (looping to handle >1000 records)
+        let hasMore = true;
+        let totalDeleted = 0;
+        let loopCount = 0;
         
-        // 1. Fetch all IDs
-        let idQuery = supabase
-          .from('sales_transactions')
-          .select('id, merchant_period_summaries!inner(merchant_name, monthly_reports!inner(report_month))');
-        
-        idQuery = applyFilters(idQuery, filters);
-        
-        // We need to fetch ALL ids. This might be heavy if millions. 
-        // Better to iterate or use server-side function. 
-        // For now, let's assume < 100k and fetch IDs.
-        const { data: idData, error: idError } = await idQuery;
-        
-        if (idError) throw idError;
-        if (!idData) return;
+        console.log("Starting bulk delete for ALL matching records...");
 
-        const idsToDelete = idData.map((d: any) => d.id);
-        
-        // Delete in batches of 1000
-        for (let i = 0; i < idsToDelete.length; i += 1000) {
-           const batch = idsToDelete.slice(i, i + 1000);
-           const { error: delError } = await supabase.from('sales_transactions').delete().in('id', batch);
-           if (delError) throw delError;
+        while (hasMore) {
+            loopCount++;
+            if (loopCount > 1000) throw new Error("Safety limit reached: infinite loop detected in deletion.");
+
+            // 1. Fetch a batch of IDs matching filters
+            // We fetch 1000 at a time. Since we delete them, the next 1000 will shift into position 0.
+            let idQuery = supabase
+              .from('sales_transactions')
+              .select('id, summary_id'); // Fetch summary_id too
+            
+            idQuery = applyFilters(idQuery, filters);
+            idQuery = idQuery.range(0, 999); // Fetch up to 1000
+            
+            const { data: idData, error: idError } = await idQuery;
+            
+            if (idError) throw idError;
+            if (!idData || idData.length === 0) {
+                hasMore = false;
+                break;
+            }
+
+            const idsToDelete = idData.map((d: any) => d.id);
+            idData.forEach((d: any) => { if (d.summary_id) affectedSummaryIds.add(d.summary_id); });
+
+            let batchDeleted = 0;
+            
+            console.log(`Iteration ${loopCount}: Found ${idsToDelete.length} records to delete...`);
+
+            // Delete in batches of 50
+            for (let i = 0; i < idsToDelete.length; i += 50) {
+               const batch = idsToDelete.slice(i, i + 50);
+               const { error: delError, count } = await supabase
+                 .from('sales_transactions')
+                 .delete({ count: 'exact' })
+                 .in('id', batch);
+               
+               if (delError) throw delError;
+               if (count) {
+                   batchDeleted += count;
+                   totalDeleted += count;
+               }
+            }
+            
+            console.log(`Iteration ${loopCount}: Successfully deleted ${batchDeleted} records.`);
+
+            // If we fetched records but deleted 0, something is wrong (permissions/mismatch)
+            if (idsToDelete.length > 0 && batchDeleted === 0) {
+                 throw new Error("Could not delete fetched records. This indicates a permission issue (RLS) or data mismatch.");
+            }
+
+            // If we fetched fewer than 1000, we are done
+            if (idData.length < 1000) {
+                hasMore = false;
+            }
         }
+        
+        console.log(`Total records deleted: ${totalDeleted}`);
 
       } else {
         // Delete by IDs
         const ids = Array.from(selectedIds);
-        const { error: delError } = await supabase
-          .from('sales_transactions')
-          .delete()
-          .in('id', ids);
-        error = delError;
+        console.log(`Deleting ${ids.length} manually selected transactions...`);
+
+        // Need to fetch summary_ids for these IDs before deleting
+        const { data: summaryData } = await supabase
+            .from('sales_transactions')
+            .select('summary_id')
+            .in('id', ids);
+        
+        summaryData?.forEach((d: any) => { if (d.summary_id) affectedSummaryIds.add(d.summary_id); });
+        
+        // Batch delete manual selection too
+        let totalDeleted = 0;
+        for (let i = 0; i < ids.length; i += 50) {
+           const batch = ids.slice(i, i + 50);
+           const { error: delError, count } = await supabase
+             .from('sales_transactions')
+             .delete({ count: 'exact' })
+             .in('id', batch);
+           
+           if (delError) {
+               error = delError;
+               throw delError;
+           }
+           if (count) totalDeleted += count;
+           console.log(`Batch ${i/50 + 1}: Requested ${batch.length}, Deleted ${count}`);
+        }
+        
+        if (totalDeleted === 0 && ids.length > 0) {
+            throw new Error("Database reported 0 records deleted. This usually indicates a permission issue (RLS) or the records no longer exist.");
+        }
       }
 
       if (error) throw error;
       
+      // Resync affected summaries
+      await resyncSummaries(affectedSummaryIds);
+
       // Reset and Refresh
       setSelectedIds(new Set());
       setSelectAllMatching(false);
       fetchTransactions();
       fetchStats();
-      alert('Transactions deleted successfully.');
+      alert('Transactions deleted successfully and summaries updated.');
       
-    } catch (err) {
+    } catch (err: any) {
       console.error('Bulk delete error:', err);
-      alert('Failed to delete transactions.');
+      alert(`Failed to delete transactions: ${err.message || JSON.stringify(err)}`);
     } finally {
       setProcessingBulk(false);
     }

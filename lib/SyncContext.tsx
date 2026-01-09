@@ -157,7 +157,7 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                 tax_fee: rowGross * 0.05,
                 transaction_date: String(r['_rawDate'] || ''),
                 venue_name: String(r['_normalizedVenue']),
-                station_name: String(r['Station Name'] || 'Unknown')
+                station_name: String(r['_normalizedStation'] || r['Station Name'] || 'Unknown')
               };
             });
             

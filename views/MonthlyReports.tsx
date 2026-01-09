@@ -1,6 +1,6 @@
 
 import { generateEmailHtml } from '../lib/EmailTemplateBuilder';
-import { API_BASE_URL } from '../lib/config';
+import { API_BASE_URL, API_KEY } from '../lib/config';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Download, 
@@ -39,7 +39,8 @@ import {
   Briefcase,
   Banknote,
   Percent,
-  List
+  List,
+  Zap
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { GoogleGenAI } from "@google/genai";
@@ -90,7 +91,8 @@ const MonthlyReports: React.FC = () => {
   const [savingNotes, setSavingNotes] = useState<Record<string, boolean>>({});
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
-  const [venueStats, setVenueStats] = useState<Record<string, {name: string, sales: number}[]>>({});
+  const [venueStats, setVenueStats] = useState<Record<string, {name: string, sales: number, stationCount: number, stations: string[]}[]>>({});
+  const [expandedVenues, setExpandedVenues] = useState<Set<string>>(new Set());
   const [transactionCounts, setTransactionCounts] = useState<Record<string, number>>({});
   const [periodStations, setPeriodStations] = useState<Record<string, string[]>>({});
 
@@ -154,7 +156,7 @@ const MonthlyReports: React.FC = () => {
 
   const fetchReports = async (forceRefresh = false) => {
     setLoading(true);
-    const cacheKey = `reports_cache_${selectedGlobalMonths.slice().sort().join('_')}`;
+    const cacheKey = `reports_cache_v2_${selectedGlobalMonths.slice().sort().join('_')}`;
 
     if (!forceRefresh) {
         try {
@@ -200,7 +202,7 @@ const MonthlyReports: React.FC = () => {
           .select(`
             *,
             monthly_reports!inner (report_month),
-            merchants!inner (id, merchant_name, contract_type, revenue_share_percentage, company_name, email, phone, contact_name, bank_name, bank_account_number, iban)
+            merchants!inner (id, merchant_name, contract_type, revenue_share_percentage, company_name, email, phone, contact_name, bank_name, bank_account_number, iban, trn, reporting_preference, notes, payment_duration)
           `)
           .in('monthly_reports.report_month', selectedGlobalMonths)
           .range(from, from + pageSize - 1);
@@ -281,7 +283,7 @@ const MonthlyReports: React.FC = () => {
         }
 
         if (allTxData) {
-            const stats: Record<string, Record<string, number>> = {};
+            const stats: Record<string, Record<string, {sales: number, stations: Set<string>}>> = {};
             const counts: Record<string, number> = {};
             const stations: Record<string, Set<string>> = {};
 
@@ -298,19 +300,27 @@ const MonthlyReports: React.FC = () => {
                 const amt = Number(tx.amount) || 0;
                 
                 if (stats[sId]) {
-                    if (!stats[sId][vName]) stats[sId][vName] = 0;
-                    stats[sId][vName] += amt;
+                    if (!stats[sId][vName]) stats[sId][vName] = { sales: 0, stations: new Set() };
+                    stats[sId][vName].sales += amt;
                     counts[sId] = (counts[sId] || 0) + 1;
-                    if (tx.station_name) stations[sId].add(tx.station_name);
+                    if (tx.station_name) {
+                        stations[sId].add(tx.station_name);
+                        stats[sId][vName].stations.add(tx.station_name);
+                    }
                 }
             });
             
-            const newStats: Record<string, {name: string, sales: number}[]> = {};
+            const newStats: Record<string, {name: string, sales: number, stationCount: number, stations: string[]}[]> = {};
             const newStations: Record<string, string[]> = {};
 
             Object.keys(stats).forEach(sId => {
                 newStats[sId] = Object.entries(stats[sId])
-                  .map(([name, sales]) => ({ name, sales }))
+                  .map(([name, data]) => ({ 
+                      name, 
+                      sales: data.sales,
+                      stationCount: data.stations.size,
+                      stations: Array.from(data.stations).sort()
+                  }))
                   .sort((a, b) => b.sales - a.sales);
                 newStations[sId] = Array.from(stations[sId]);
             });
@@ -325,6 +335,19 @@ const MonthlyReports: React.FC = () => {
       }
   };
 
+  const toggleVenue = (summaryId: string, venueName: string) => {
+    const key = `${summaryId}_${venueName}`;
+    setExpandedVenues(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
   const togglePaymentStatus = async (summaryId: string, currentStatus: boolean) => {
     setUpdatingPaymentId(summaryId);
     try {
@@ -335,7 +358,20 @@ const MonthlyReports: React.FC = () => {
       
       if (error) throw error;
       
-      setReports(prev => prev.map(r => r.id === summaryId ? { ...r, is_paid: !currentStatus } : r));
+      setReports(prev => {
+        const updatedReports = prev.map(r => r.id === summaryId ? { ...r, is_paid: !currentStatus } : r);
+        
+        // Update Local Cache
+        const cacheKey = `reports_cache_v3_${selectedGlobalMonths.slice().sort().join('_')}`;
+        try {
+            localStorage.setItem(cacheKey, JSON.stringify(updatedReports));
+        } catch (e) {
+            console.warn("Failed to update cache", e);
+        }
+
+        return updatedReports;
+      });
+
       if (detailSummary?.id === summaryId) {
         setDetailSummary({ ...detailSummary, is_paid: !currentStatus });
       }
@@ -369,7 +405,10 @@ const MonthlyReports: React.FC = () => {
           contract_type: editingMerchant.contract_type,
           revenue_share_percentage: editingMerchant.revenue_share_percentage,
           company_name: editingMerchant.company_name,
-          merchant_name: editingMerchant.merchant_name
+          merchant_name: editingMerchant.merchant_name,
+          trn: editingMerchant.trn,
+          reporting_preference: editingMerchant.reporting_preference,
+          notes: editingMerchant.notes
         })
         .eq('id', editingMerchant.id);
 
@@ -424,22 +463,34 @@ const MonthlyReports: React.FC = () => {
       }
 
       // Update local state
-      setReports(prev => prev.map(r => {
-        if (r.merchants.id === editingMerchant.id) {
-            // Check if this specific report row was recalculated
-            // Note: 'r' here corresponds to a merchant_period_summary row (fetched with join)
-            // r.id is the summary id
-            const recalculated = recalculatedReports.find(rec => rec.id === r.id);
-            const newPayable = recalculated ? recalculated.merchant_payable : r.merchant_payable;
+      setReports(prev => {
+        const updatedReports = prev.map(r => {
+            if (r.merchants.id === editingMerchant.id) {
+                // Check if this specific report row was recalculated
+                // Note: 'r' here corresponds to a merchant_period_summary row (fetched with join)
+                // r.id is the summary id
+                const recalculated = recalculatedReports.find(rec => rec.id === r.id);
+                const newPayable = recalculated ? recalculated.merchant_payable : r.merchant_payable;
 
-            return { 
-                ...r, 
-                merchants: { ...r.merchants, ...editingMerchant },
-                merchant_payable: newPayable
-            };
+                return { 
+                    ...r, 
+                    merchants: { ...r.merchants, ...editingMerchant },
+                    merchant_payable: newPayable
+                };
+            }
+            return r;
+        });
+
+        // Update Local Cache
+        const cacheKey = `reports_cache_v2_${selectedGlobalMonths.slice().sort().join('_')}`;
+        try {
+            localStorage.setItem(cacheKey, JSON.stringify(updatedReports));
+        } catch (e) {
+            console.warn("Failed to update cache", e);
         }
-        return r;
-      }));
+
+        return updatedReports;
+      });
 
       setIsEditModalOpen(false);
       setEditingMerchant(null);
@@ -940,8 +991,8 @@ const MonthlyReports: React.FC = () => {
       merchantName: mInfo.name,
       to: mInfo.merchant.email || '',
       cc: 'finance@powerpod.ae',
-      bcc: 'audit@powerpod.ae',
-      subject: `Powerpod Financial Statement - ${mInfo.name} [${selected.join(', ')}]`,
+      bcc: '',
+      subject: 'Powerpod Sales Report',
       phone: mInfo.merchant.phone || ''
     });
   };
@@ -974,9 +1025,21 @@ const MonthlyReports: React.FC = () => {
         if (error) throw error;
         
         // Update local reports state
-        setReports(prev => prev.map(r => 
-            r.id === reportId ? { ...r, remittance_note: note } : r
-        ));
+        setReports(prev => {
+            const updatedReports = prev.map(r => 
+                r.id === reportId ? { ...r, remittance_note: note } : r
+            );
+
+            // Update Local Cache
+            const cacheKey = `reports_cache_v2_${selectedGlobalMonths.slice().sort().join('_')}`;
+            try {
+                localStorage.setItem(cacheKey, JSON.stringify(updatedReports));
+            } catch (e) {
+                console.warn("Failed to update cache", e);
+            }
+
+            return updatedReports;
+        });
 
     } catch (err) {
         console.error('Failed to save note', err);
@@ -1004,6 +1067,40 @@ const MonthlyReports: React.FC = () => {
     try {
       const selected = merchantSelections[draft.merchantId] || [];
       const mInfo = filteredMerchantsList.find(m => m.id === draft.merchantId)!;
+
+      // Update merchant email if changed
+      if (draft.to && draft.to !== mInfo.merchant.email) {
+        setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'Updating merchant email record...'] }));
+        const { error: updateError } = await supabase
+            .from('merchants')
+            .update({ email: draft.to })
+            .eq('id', draft.merchantId);
+        
+        if (!updateError) {
+            // Update local state
+            setReports(prev => {
+                const updatedReports = prev.map(r => {
+                    if (r.merchants.id === draft.merchantId) {
+                        return { ...r, merchants: { ...r.merchants, email: draft.to } };
+                    }
+                    return r;
+                });
+
+                // Update Local Cache
+                const cacheKey = `reports_cache_v3_${selectedGlobalMonths.slice().sort().join('_')}`;
+                try {
+                    localStorage.setItem(cacheKey, JSON.stringify(updatedReports));
+                } catch (e) {
+                    console.warn("Failed to update cache", e);
+                }
+
+                return updatedReports;
+            });
+        } else {
+            console.warn("Failed to update merchant email:", updateError);
+        }
+      }
+
       const relevantReports = mInfo.periods.filter(p => selected.includes(p.monthly_reports.report_month));
 
       // 1. Generate PDF
@@ -1195,35 +1292,44 @@ const MonthlyReports: React.FC = () => {
       message += `For inquiries: finance@powerpod.ae\n`;
       message += `Powerpod | www.powerpod.ae | 0547755452`;
 
-      // 4. Send via Backend
-      setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'Sending via WhatsApp Gateway...'] }));
+      // 4. Send via Local WhatsApp Gateway
+      setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'Dispatching via Local Gateway...'] }));
+
+      // Sanitize phone number to international format (e.g. 97150xxxxxxx)
+      let phoneNumber = draft.phone.replace(/\D/g, '');
+      if (phoneNumber.startsWith('05')) {
+          phoneNumber = '971' + phoneNumber.substring(1);
+      } else if (phoneNumber.startsWith('5') && phoneNumber.length === 9) {
+          phoneNumber = '971' + phoneNumber;
+      }
 
       const res = await fetch(`${API_BASE_URL}/send-whatsapp`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+              'Content-Type': 'application/json',
+              'x-api-key': API_KEY 
+          },
           body: JSON.stringify({
-              to: draft.phone,
-              message: message,
-              file: {
-                  mimetype: 'application/pdf',
-                  data: pdfDataUri,
-                  filename: `Powerpod_Report_${draft.merchantName.replace(/\s+/g, '_')}.pdf`
-              }
+              number: phoneNumber,
+              message: message
           })
       });
 
-      const result = await res.json();
-      if (!result.success) throw new Error(result.error || 'Unknown error');
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+          throw new Error(data.error || `Server returned ${res.status}`);
+      }
 
       setDispatchStatus({ 
         msg: 'WhatsApp Message Sent!', 
-        logs: ['Message delivered to gateway.', 'PDF attached.', 'Gateway confirmed receipt.'],
+        logs: ['Message dispatched to gateway.', 'Gateway confirmed delivery.'],
         type: 'success' 
       });
       setTimeout(() => setDispatchStatus(null), 3000);
 
     } catch (err: any) {
-      setDispatchStatus({ msg: 'WhatsApp Dispatch Failed.', logs: [err.message, 'Ensure WhatsApp is connected in Settings.'], type: 'error' });
+      console.error(err);
+      setDispatchStatus({ msg: 'WhatsApp Dispatch Failed.', logs: [err.message, 'Check internet connection and phone number.'], type: 'error' });
       setTimeout(() => setDispatchStatus(null), 5000);
     }
   };
@@ -1234,7 +1340,12 @@ const MonthlyReports: React.FC = () => {
     setIsGeneratingPDF(mId);
     try {
       const doc = await generatePDFObject(mId, selected);
-      if (doc) doc.save(`Powerpod_${mId}_Report.pdf`);
+      if (doc) {
+        const mInfo = filteredMerchantsList.find(m => m.id === mId);
+        const mName = mInfo?.merchant.merchant_name || mInfo?.name || mId;
+        const monthStr = selected.length === 1 ? selected[0] : `${selected.length}_Months`;
+        doc.save(`Sales report - ${monthStr} - ${mName}.pdf`);
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -1431,21 +1542,36 @@ const MonthlyReports: React.FC = () => {
                           <span className="px-2.5 py-1 bg-blue-50 text-blue-600 rounded-lg text-[9px] font-black uppercase tracking-widest">
                             {mGroup.merchant.contract_type}
                           </span>
+                          {mGroup.merchant.reporting_preference && (
+                            <span className={`ml-2 px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest flex items-center inline-flex ${mGroup.merchant.reporting_preference === 'whatsapp' ? 'bg-green-50 text-green-600' : 'bg-orange-50 text-orange-600'}`}>
+                                {mGroup.merchant.reporting_preference === 'whatsapp' ? <MessageSquare size={10} className="mr-1.5" /> : <Mail size={10} className="mr-1.5" />}
+                                {mGroup.merchant.reporting_preference}
+                            </span>
+                          )}
+                          {mGroup.merchant.payment_duration && (
+                            <span className="ml-2 px-2.5 py-1 bg-blue-50 text-blue-600 rounded-lg text-[9px] font-black uppercase tracking-widest flex items-center inline-flex">
+                                <Clock size={10} className="mr-1.5" />
+                                {mGroup.merchant.payment_duration}
+                            </span>
+                          )}
                         </div>
                       </div>
+
                     </div>
                   </div>
                   <div className="mt-8 lg:mt-0 flex flex-col items-end">
-                    <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-1">Selection Net Payout</p>
+                    <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-1">Merchant Payout</p>
                     <p className="text-4xl font-black text-blue-600">AED {f(totalPayout)}</p>
-                    <p className="text-[11px] font-bold text-gray-400 mt-1">AED {f(totalGross)} Gross Audit</p>
+                    <div className="flex flex-col items-end mt-1 space-y-0.5">
+                        <p className="text-[11px] font-bold text-green-600">AED {f(relevantPeriods.reduce((acc, p) => acc + (p.net_profit || 0), 0))} Net Income</p>
+                    </div>
                   </div>
                 </div>
 
                 {/* Merchant Stats Summary */}
                 <div className="px-10 py-6 bg-white border-b border-gray-100 grid grid-cols-2 md:grid-cols-5 gap-6">
                     <div>
-                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Gross Sales</p>
+                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Sales</p>
                         <p className="text-xl font-black text-gray-900">AED {f(relevantPeriods.reduce((acc, p) => acc + n(p.total_sales), 0))}</p>
                     </div>
                     <div>
@@ -1474,6 +1600,78 @@ const MonthlyReports: React.FC = () => {
                          </p>
                     </div>
                 </div>
+
+                {/* Active Venues Breakdown */}
+                {(() => {
+                    const uniqueVenues = new Map<string, {name: string, stationCount: number, stations: Set<string>}>();
+                    relevantPeriods.forEach(p => {
+                        const stats = venueStats[p.id] || [];
+                        stats.forEach(v => {
+                            if (!uniqueVenues.has(v.name)) {
+                                uniqueVenues.set(v.name, { name: v.name, stationCount: 0, stations: new Set() });
+                            }
+                            const current = uniqueVenues.get(v.name)!;
+                            current.stationCount = Math.max(current.stationCount, v.stationCount);
+                            if (v.stations) v.stations.forEach(s => current.stations.add(s));
+                        });
+                    });
+                    const merchantVenueList = Array.from(uniqueVenues.values()).sort((a, b) => b.stationCount - a.stationCount);
+                    
+                    if (merchantVenueList.length === 0) {
+                        return (
+                            <div className="px-10 py-6 bg-gray-50/50 border-b border-gray-100">
+                                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 flex items-center">
+                                    <Store size={12} className="mr-2" />
+                                    Active Venues & Stations
+                                </p>
+                                <div className="flex flex-wrap gap-3">
+                                    <div className="flex items-center bg-white px-3 py-2 rounded-xl border border-gray-100 shadow-sm">
+                                        <span className="text-xs font-bold text-gray-700 mr-2">{mGroup.merchant.merchant_name}</span>
+                                        <span className="text-[10px] font-black text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded-md border border-gray-100">1 Venue</span>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    }
+
+                    return (
+                        <div className="px-10 py-6 bg-gray-50/50 border-b border-gray-100">
+                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 flex items-center">
+                                <Store size={12} className="mr-2" />
+                                Active Venues & Stations
+                            </p>
+                            <div className="flex flex-wrap gap-3">
+                                {merchantVenueList.map((v, idx) => {
+                                    const isExpanded = expandedVenues.has(`${mGroup.id}_${v.name}`);
+                                    return (
+                                    <div 
+                                        key={idx} 
+                                        onClick={() => toggleVenue(mGroup.id, v.name)}
+                                        className={`flex flex-col bg-white px-3 py-2 rounded-xl border transition-all cursor-pointer shadow-sm ${isExpanded ? 'border-blue-200 ring-2 ring-blue-50' : 'border-gray-100 hover:border-blue-200'}`}
+                                    >
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center">
+                                                <span className="text-xs font-bold text-gray-700 mr-2">{v.name}</span>
+                                                <span className="text-[10px] font-black text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded-md border border-gray-100">{v.stationCount} Station{v.stationCount !== 1 ? 's' : ''}</span>
+                                            </div>
+                                            <ChevronDown size={12} className={`text-gray-400 transition-transform ml-2 ${isExpanded ? 'rotate-180' : ''}`} />
+                                        </div>
+                                        {isExpanded && (
+                                            <div className="mt-2 pt-2 border-t border-gray-50 grid grid-cols-1 gap-1">
+                                                {Array.from(v.stations).sort().map(station => (
+                                                    <div key={station} className="flex items-center space-x-2">
+                                                        <Zap size={8} className="text-amber-500" />
+                                                        <span className="text-[9px] font-bold text-gray-500">{station}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )})}
+                            </div>
+                        </div>
+                    );
+                })()}
 
                 <div className="p-10 space-y-10 bg-white">
                   <div className="space-y-4">
@@ -1591,17 +1789,43 @@ const MonthlyReports: React.FC = () => {
                                               <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3">Venue Breakdown</p>
                                               {venueStats[p.id] ? (
                                                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                                                      {venueStats[p.id].map(v => (
-                                                          <div key={v.name} className="bg-white p-3 rounded-xl border border-gray-100 flex justify-between items-center shadow-sm">
+                                                      {venueStats[p.id].map(v => {
+                                                  const isExpanded = expandedVenues.has(`${p.id}_${v.name}`);
+                                                  return (
+                                                      <div 
+                                                          key={v.name} 
+                                                          onClick={() => toggleVenue(p.id, v.name)}
+                                                          className={`bg-white p-3 rounded-xl border transition-all cursor-pointer shadow-sm ${isExpanded ? 'border-blue-200 ring-2 ring-blue-50' : 'border-gray-100 hover:border-blue-200'}`}
+                                                      >
+                                                          <div className="flex justify-between items-center">
                                                               <div className="flex items-center space-x-3 overflow-hidden">
                                                                   <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center text-blue-600">
                                                                       <Building2 size={14} />
                                                                   </div>
-                                                                  <span className="text-[10px] font-bold text-gray-700 uppercase truncate" title={v.name}>{v.name}</span>
+                                                                  <div className="flex flex-col overflow-hidden">
+                                                                    <span className="text-[10px] font-bold text-gray-700 uppercase truncate" title={v.name}>{v.name}</span>
+                                                                    <div className="flex items-center space-x-1">
+                                                                        <span className="text-[9px] text-gray-400 font-medium">{v.stationCount} Station{v.stationCount !== 1 ? 's' : ''}</span>
+                                                                        <ChevronDown size={10} className={`text-gray-300 transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`} />
+                                                                    </div>
+                                                                  </div>
                                                               </div>
                                                               <span className="font-mono text-xs font-black text-gray-900">AED {f(v.sales)}</span>
                                                           </div>
-                                                      ))}
+                                                          
+                                                          {isExpanded && v.stations && (
+                                                              <div className="mt-3 pt-3 border-t border-gray-50 grid grid-cols-2 gap-2 animate-in slide-in-from-top-1 fade-in duration-200">
+                                                                  {v.stations.map(station => (
+                                                                      <div key={station} className="flex items-center space-x-2 bg-gray-50 px-2 py-1.5 rounded-lg border border-gray-100/50">
+                                                                          <Zap size={10} className="text-amber-500 shrink-0" />
+                                                                          <span className="text-[9px] font-bold text-gray-600 truncate" title={station}>{station}</span>
+                                                                      </div>
+                                                                  ))}
+                                                              </div>
+                                                          )}
+                                                      </div>
+                                                  );
+                                              })}
                                                   </div>
                                               ) : (
                                                   <div className="flex items-center space-x-2 text-gray-400">
@@ -1927,14 +2151,44 @@ const MonthlyReports: React.FC = () => {
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Company Legal Name</label>
-                      <input 
-                        type="text"
-                        className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
-                        value={editingMerchant.company_name}
-                        onChange={(e) => setEditingMerchant({...editingMerchant, company_name: e.target.value})}
-                      />
-                    </div>
+                          <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Company Legal Name</label>
+                          <input 
+                              type="text"
+                              className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                              value={editingMerchant.company_name}
+                              onChange={(e) => setEditingMerchant({...editingMerchant, company_name: e.target.value})}
+                          />
+                      </div>
+                      <div className="space-y-2">
+                          <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">TRN</label>
+                          <input 
+                              type="text"
+                              className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                              value={editingMerchant.trn || ''}
+                              onChange={(e) => setEditingMerchant({...editingMerchant, trn: e.target.value})}
+                          />
+                      </div>
+                      <div className="space-y-2">
+                          <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Reporting Preference</label>
+                          <select 
+                              className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                              value={editingMerchant.reporting_preference || ''}
+                              onChange={(e) => setEditingMerchant({...editingMerchant, reporting_preference: e.target.value as 'email' | 'whatsapp'})}
+                          >
+                              <option value="">Select Preference</option>
+                              <option value="email">Email</option>
+                              <option value="whatsapp">WhatsApp</option>
+                          </select>
+                      </div>
+                      <div className="space-y-2">
+                          <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Notes</label>
+                          <textarea 
+                              className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                              value={editingMerchant.notes || ''}
+                              onChange={(e) => setEditingMerchant({...editingMerchant, notes: e.target.value})}
+                              rows={3}
+                          />
+                      </div>
                     <div className="space-y-2">
                       <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Primary Contact Name</label>
                       <input 
