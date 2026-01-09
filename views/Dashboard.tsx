@@ -52,7 +52,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     profit: 0,
     merchants: 0,
     stations: 0,
-    pendingPayouts: 0
+    pendingPayouts: 0,
+    payout: 0,
+    netIncome: 0
   });
   
   const [chartData, setChartData] = useState<any[]>([]);
@@ -129,12 +131,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         .select('report_month')
         .order('report_month', { ascending: false });
       
-      // Sanitized periods: Only show valid month-year strings, excluding internal labels
+      // Sanitized periods: Only show valid month-year strings
       const months = Array.from(new Set<string>(data?.map((m: any) => m.report_month as string) || []))
         .filter(m => {
           if (!m) return false;
-          const lower = m.toLowerCase();
-          return lower !== 'parsed period' && !lower.includes('pending') && !lower.includes('audit');
+          // Show all periods to ensure totals match transactions
+          return true; 
         }) as string[];
       
       // Sort months chronologically descending (newest first)
@@ -161,7 +163,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       
       const merchantContractMap = new Map(merchantsData?.map((m: any) => [m.id, m]) || []);
 
-      // 2. Build Query for Summaries (to get IDs and status)
+      // 2. Build Query for Summaries
       let summaryQuery = supabase
         .from('merchant_period_summaries')
         .select(`
@@ -169,6 +171,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           merchant_id,
           is_paid,
           merchant_payable,
+          total_sales,
+          net_profit,
           monthly_reports!inner (report_month),
           merchants!inner (merchant_name, company_name)
         `);
@@ -186,91 +190,109 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       const { count: mCount } = await supabase.from('merchants').select('*', { count: 'exact', head: true });
       const { count: sCount } = await supabase.from('stations').select('*', { count: 'exact', head: true });
 
-      let totalRevenue = 0;
-      let totalProfit = 0;
+      // 4. Calculate Total Sales from Transactions (Source of Truth)
+      // This ensures Dashboard Total Sales matches Transactions Tab exactly
+      
+      // We need to match the exact same logic as Transactions.tsx which calculates Grand Total
+      // Transactions.tsx fetches everything and sums it up on the client side (chunked).
+      
+      let realTotalSales = 0;
+      
+      // If we are filtering by period/status, we can use a query
+      // But if no filters are active, we should use a simpler count or aggregate if possible
+      // However, to be 100% accurate with the Transactions tab which might have specific inclusion rules
+      // we will replicate the fetch.
+      
+      // Optimization: Use Supabase aggregate if possible, but RLS might prevent it or require exact same query
+      // Let's fetch ONLY the amount column to minimize bandwidth
+      
+      const CHUNK_SIZE = 1000;
+      let allAmounts: number[] = [];
+      let hasMore = true;
+      let offset = 0;
+      
+      // Fetch in chunks to avoid timeouts/limits
+      while (hasMore) {
+          let txQuery = supabase.from('sales_transactions')
+            .select(`
+              amount,
+              merchant_period_summaries!inner (
+                 is_paid,
+                 monthly_reports!inner (report_month)
+              )
+            `);
+
+          if (paymentFilter === 'PENDING') txQuery = txQuery.eq('merchant_period_summaries.is_paid', false);
+          if (paymentFilter === 'SETTLED') txQuery = txQuery.eq('merchant_period_summaries.is_paid', true);
+          
+          if (selectedMonths.length > 0) {
+            txQuery = txQuery.in('merchant_period_summaries.monthly_reports.report_month', selectedMonths);
+          }
+          
+          const { data: chunk, error } = await txQuery.range(offset, offset + CHUNK_SIZE - 1);
+          
+          if (error) {
+              console.error('Error fetching transaction chunk:', error);
+              break;
+          }
+          
+          if (chunk && chunk.length > 0) {
+              const amounts = chunk.map((t: any) => Number(t.amount) || 0);
+              allAmounts = allAmounts.concat(amounts);
+              offset += CHUNK_SIZE;
+              
+              if (chunk.length < CHUNK_SIZE) hasMore = false;
+          } else {
+              hasMore = false;
+          }
+      }
+      
+      realTotalSales = allAmounts.reduce((sum, val) => sum + val, 0);
+
+      let totalRevenue = 0; // Will be replaced by realTotalSales
+      let totalPayout = 0;
       let totalPending = 0;
       let rankingMap = new Map();
 
       if (summaries && summaries.length > 0) {
-          const summaryIds = summaries.map((s: any) => s.id);
-          const summaryStatus = new Map(summaries.map((s: any) => [s.id, { 
-              merchant_id: s.merchant_id, 
-              is_paid: s.is_paid,
-              original_payable: s.merchant_payable,
-              merchant_info: s.merchants
-          }]));
-
-          // Fetch Transactions in Batches
-          let transactions: any[] = [];
-          const batchSize = 50;
-          for (let i = 0; i < summaryIds.length; i += batchSize) {
-              const batch = summaryIds.slice(i, i + batchSize);
-              const { data: txBatch } = await supabase
-                  .from('sales_transactions')
-                  .select('amount, stripe_fee, tax_fee, summary_id')
-                  .in('summary_id', batch);
+          summaries.forEach((s: any) => {
+              const sales = n(s.total_sales);
+              const payable = n(s.merchant_payable);
+              // const net = n(s.net_profit); // No longer used for income calc
               
-              if (txBatch) transactions = transactions.concat(txBatch);
-          }
+              totalRevenue += sales; // Kept for reference but overwritten below
+              totalPayout += payable;
 
-          // Calculate Stats from Transactions
-          const fixedChargesAdded = new Set<string>();
-
-          transactions.forEach(tx => {
-              const summary = summaryStatus.get(tx.summary_id);
-              if (!summary) return;
-
-              const amount = n(tx.amount);
-              const stripe = n(tx.stripe_fee);
-              const tax = n(tx.tax_fee);
-              const net = amount - stripe - tax;
-
-              totalRevenue += amount;
-              totalProfit += net;
-
-              // Calculate Payable
-              const merchant = merchantContractMap.get(summary.merchant_id);
-              if (merchant && !summary.is_paid) {
-                  if (merchant.contract_type === 'Fixed Charge - Monthly') {
-                      if (!fixedChargesAdded.has(tx.summary_id)) {
-                          totalPending += n(summary.original_payable);
-                          fixedChargesAdded.add(tx.summary_id);
-                      }
-                  } else {
-                      const share = n(merchant.revenue_share_percentage);
-                      totalPending += net * (share / 100);
-                  }
+              if (!s.is_paid) {
+                  totalPending += payable;
               }
 
               // Update Ranking
-              const mId = summary.merchant_id;
+              const mId = s.merchant_id;
               const existing = rankingMap.get(mId) || { 
-                name: summary.merchant_info.merchant_name, 
-                company: summary.merchant_info.company_name, 
+                name: s.merchants.merchant_name, 
+                company: s.merchants.company_name, 
                 sales: 0 
               };
-              existing.sales += amount;
+              existing.sales += sales;
               rankingMap.set(mId, existing);
           });
-
-          // Add Fixed Charges for summaries with NO transactions (if any)
-          summaries.forEach((s: any) => {
-              const merchant = merchantContractMap.get(s.merchant_id);
-              if (merchant && !s.is_paid && merchant.contract_type === 'Fixed Charge - Monthly') {
-                 if (!fixedChargesAdded.has(s.id)) {
-                     totalPending += n(s.merchant_payable);
-                     fixedChargesAdded.add(s.id);
-                 }
-              }
-          });
       }
+      
+      // Override Revenue with Transaction-based Sum
+      totalRevenue = realTotalSales;
+
+      // Platform Net Income = Total Sales - Total Merchant Payout
+      const platformNetIncome = totalRevenue - totalPayout;
 
       setStats({
         revenue: totalRevenue,
-        profit: totalProfit,
+        profit: platformNetIncome, 
         merchants: mCount || 0,
         stations: sCount || 0,
-        pendingPayouts: totalPending
+        pendingPayouts: totalPending,
+        payout: totalPayout,
+        netIncome: platformNetIncome
       });
 
       // 4. Chart Data (Sanitized periods)
@@ -281,8 +303,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
 
       const filteredReports = reports?.filter((r: any) => {
         if (!r.report_month) return false;
-        const lower = r.report_month.toLowerCase();
-        return lower !== 'parsed period' && !lower.includes('pending') && !lower.includes('audit');
+        return true; // Show all periods
       }) || [];
 
       // Sort reports chronologically
@@ -354,12 +375,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       doc.rect(25 + boxWidth, 80, boxWidth, 25, 'F');
 
       doc.setFont('helvetica', 'bold');
-      doc.text('Aggregated Gross Sales', 20, 88);
-      doc.text('Aggregated Net Profit', 30 + boxWidth, 88);
+      doc.text('Total Sales', 20, 88);
+      doc.text('Total Merchant Payout', 30 + boxWidth, 88);
       doc.setFontSize(14);
       doc.setTextColor(37, 99, 235);
       doc.text(`AED ${f(stats.revenue)}`, 20, 98);
-      doc.text(`AED ${f(stats.profit)}`, 30 + boxWidth, 98);
+      doc.text(`AED ${f(stats.payout)}`, 30 + boxWidth, 98);
 
       // Merchant Rankings Table
       doc.setTextColor(0, 0, 0);
@@ -574,10 +595,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       ) : (
         <>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
-            <StatCard label="Selected Gross Sales" value={`AED ${stats.revenue.toLocaleString()}`} subtext="Audited Period Total" icon={DollarSign} color="blue" />
-            <StatCard label="Aggregated Net Profit" value={`AED ${stats.profit.toLocaleString()}`} subtext="After Stripe & Tax" icon={TrendingUp} color="green" />
+            <StatCard label="Total Sales" value={`AED ${stats.revenue.toLocaleString()}`} subtext="Audited Period Total" icon={DollarSign} color="blue" />
+            <StatCard label="Total Merchant Payout" value={`AED ${stats.payout.toLocaleString()}`} subtext="After Stripe & Tax" icon={TrendingUp} color="green" />
             <StatCard label="Unsettled Liabilities" value={`AED ${stats.pendingPayouts.toLocaleString()}`} subtext="Pending Merchant Transfers" icon={Clock} color="amber" />
-            <StatCard label="Active Personnel" value={stats.merchants} subtext="Partner Network Size" icon={Users} color="purple" />
+            <StatCard label="Total Income" value={`AED ${stats.netIncome.toLocaleString()}`} subtext="Platform Net Earnings" icon={Users} color="purple" />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-10">
