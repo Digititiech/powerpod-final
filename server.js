@@ -7,9 +7,56 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import fs from 'fs';
 import helmet from 'helmet';
+import { Queue, Worker } from 'bullmq';
+import IORedis from 'ioredis';
 
 // Load environment variables
 dotenv.config();
+
+// --- Redis & Queue Setup ---
+const redisConnection = new IORedis({
+    host: '127.0.0.1',
+    port: 6379,
+    maxRetriesPerRequest: null // Required by BullMQ
+});
+
+const messageQueue = new Queue('whatsapp-messages', { connection: redisConnection });
+
+// Queue Worker (Process messages in background)
+const worker = new Worker('whatsapp-messages', async (job) => {
+    const { number, message } = job.data;
+    
+    // Check connection
+    if (connectionStatus !== 'connected' || !sock) {
+        throw new Error('WhatsApp not connected');
+    }
+
+    // Format number
+    let formattedNumber = number.replace(/\D/g, '');
+    if (!formattedNumber.endsWith('@s.whatsapp.net')) {
+        formattedNumber += '@s.whatsapp.net';
+    }
+
+    // Send Message
+    console.log(`Processing Job ${job.id}: Sending to ${formattedNumber}`);
+    const sentMsg = await sock.sendMessage(formattedNumber, { text: message });
+    
+    // Random delay to mimic human behavior (optional but safe)
+    await new Promise(resolve => setTimeout(resolve, Math.random() * 500 + 500));
+    
+    return sentMsg;
+}, { 
+    connection: redisConnection,
+    concurrency: 5 // Process 5 messages at once
+});
+
+worker.on('completed', job => {
+    console.log(`Job ${job.id} has completed!`);
+});
+
+worker.on('failed', (job, err) => {
+    console.log(`Job ${job.id} has failed with ${err.message}`);
+});
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -22,7 +69,8 @@ const allowedOrigins = [
   'http://localhost:3000',
   'https://webapp.powerpod.ae',
   'http://185.203.118.30:3001',
-  'https://api.powerpod.ae'
+  'https://api.powerpod.ae',
+  'https://testapp.powerpod.ae'
 ];
 app.use(cors({
   origin: true, // Allow all for now or restrict to allowedOrigins
@@ -153,6 +201,16 @@ async function initWhatsApp() {
               shouldReconnect = false;
               return;
           }
+          
+          if (statusCode === 401) { // DisconnectReason.loggedOut
+              logDebug('Session Logged Out. Cleaning up...');
+              connectionStatus = 'disconnected';
+              shouldReconnect = false;
+              if (fs.existsSync('auth_info_baileys')) {
+                  fs.rmSync('auth_info_baileys', { recursive: true, force: true });
+              }
+              return;
+          }
 
           logDebug(`Connection closed: ${statusCode}, reconnecting: ${shouldReconnectLocal}`);
           connectionStatus = 'disconnected';
@@ -160,10 +218,10 @@ async function initWhatsApp() {
           
           if (shouldReconnectLocal && shouldReconnect) {
             // Add delay to prevent tight loops and allow cleanup
-            logDebug('Reconnecting in 3 seconds...');
+            logDebug('Reconnecting in 5 seconds...');
             setTimeout(() => {
-                initWhatsApp();
-            }, 3000);
+                if (shouldReconnect) initWhatsApp();
+            }, 5000);
           } else {
             logDebug(`Logged out/Stopped. Code: ${statusCode}`);
           }
@@ -234,6 +292,15 @@ app.get('/api/whatsapp-status', (req, res) => {
 });
 
 app.post('/api/disconnect-whatsapp', async (req, res) => {
+    handleDisconnect(req, res);
+});
+
+// Alias for backward compatibility with old frontend versions
+app.post('/api/whatsapp/logout', async (req, res) => {
+    handleDisconnect(req, res);
+});
+
+async function handleDisconnect(req, res) {
     shouldReconnect = false;
     try {
         if (sock) {
@@ -250,31 +317,44 @@ app.post('/api/disconnect-whatsapp', async (req, res) => {
         }
         connectionStatus = 'disconnected';
         qrCode = null;
+        
+        // Send response immediately
         res.json({ success: true, message: 'Disconnected successfully' });
+
+        // Auto-restart initialization for a new session
+        setTimeout(() => {
+            shouldReconnect = true;
+            initWhatsApp();
+        }, 1000);
+
     } catch (error) {
         console.error('Error disconnecting:', error);
-        res.status(500).json({ error: error.message });
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
     }
-});
+}
 
 app.post('/api/send-whatsapp', async (req, res) => {
     try {
         const { number, message } = req.body;
         
-        if (connectionStatus !== 'connected' || !sock) {
-            return res.status(400).json({ error: 'WhatsApp not connected' });
+        if (!number || !message) {
+            return res.status(400).json({ error: 'Missing number or message' });
         }
 
-        // Format number: remove non-digits, ensure suffix
-        let formattedNumber = number.replace(/\D/g, '');
-        if (!formattedNumber.endsWith('@s.whatsapp.net')) {
-            formattedNumber += '@s.whatsapp.net';
-        }
+        // Add to Queue instead of sending directly
+        const job = await messageQueue.add('send-message', { number, message }, {
+            attempts: 3, // Retry 3 times if it fails
+            backoff: {
+                type: 'exponential',
+                delay: 1000,
+            }
+        });
 
-        const sentMsg = await sock.sendMessage(formattedNumber, { text: message });
-        res.json({ success: true, data: sentMsg });
+        res.json({ success: true, message: 'Message Queued', jobId: job.id });
     } catch (error) {
-        console.error('Error sending WhatsApp message:', error);
+        console.error('Error queuing WhatsApp message:', error);
         res.status(500).json({ error: error.message });
     }
 });

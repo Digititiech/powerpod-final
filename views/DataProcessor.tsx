@@ -37,6 +37,7 @@ const DataProcessor: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [missingMerchants, setMissingMerchants] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const preCalcFileInputRef = useRef<HTMLInputElement>(null);
   const SAMPLE_FILE_URL = "#";
 
   const distinctPeriods = useMemo(() => {
@@ -241,6 +242,109 @@ const DataProcessor: React.FC = () => {
     setMissingMerchants([]);
   };
 
+  const handlePreCalcFileProcess = async (file: File) => {
+    // @ts-ignore
+    const XLSX = window.XLSX;
+    if (!XLSX) {
+      setError("Excel processing engine not ready.");
+      return;
+    }
+
+    setIsProcessing(true);
+    setError(null);
+    clearResults();
+    
+    const metaMap = new Map<string, { share: number, type: string }>();
+
+    try {
+      const reader = new FileReader();
+      reader.onload = async (evt) => {
+        try {
+          const data = evt.target?.result;
+          const wb = XLSX.read(data, { type: 'array' });
+          
+          const firstSheetName = wb.SheetNames[0];
+          const rawData = XLSX.utils.sheet_to_json(wb.Sheets[firstSheetName]);
+
+          const processed: any[] = [];
+          let totalSalesAccumulated = 0;
+          const merchantSet = new Set<string>();
+
+          rawData.forEach((row: any) => {
+            const venueKey = getFuzzyKey(row, ['rental', 'venue']) || getFuzzyKey(row, ['venue']);
+            const amountKey = getFuzzyKey(row, ['actual', 'fee']) || getFuzzyKey(row, ['amount']);
+            const timeKey = getFuzzyKey(row, ['rental', 'time']) || getFuzzyKey(row, ['date']);
+            const stationKey = getFuzzyKey(row, ['rental', 'station']) || getFuzzyKey(row, ['station', 'name']);
+            const stripeFeeKey = getFuzzyKey(row, ['stripe', 'fee']);
+            
+            const rentalVenue = sanitizeValue(row[venueKey || '']);
+            const rawDate = sanitizeValue(row[timeKey || '']);
+            const amount = parseFloat(sanitizeValue(row[amountKey || '']).replace(/[^0-9.-]/g, '')) || 0;
+            const station = sanitizeValue(row[stationKey || '']);
+            const merchant = extractMerchant(rentalVenue);
+            const period = parsePeriod(rawDate);
+            
+            // Use existing fee or 0
+            const stripeFee = stripeFeeKey ? (parseFloat(sanitizeValue(row[stripeFeeKey]).replace(/[^0-9.-]/g, '')) || 0) : 0;
+            
+            processed.push({
+              ...row,
+              'Merchant': merchant,
+              'Stripe Fees': Number(stripeFee.toFixed(2)),
+              'Report Month': period,
+              '_normalizedVenue': rentalVenue,
+              '_normalizedStation': station,
+              '_rawAmount': amount,
+              '_rawDate': rawDate
+            });
+
+            totalSalesAccumulated += amount;
+            merchantSet.add(merchant);
+          });
+
+          // Fetch all merchants from DB
+          const uniqueMerchants = Array.from(merchantSet);
+          if (uniqueMerchants.length > 0) {
+            const { data: dbMerchants } = await supabase
+              .from('merchants')
+              .select('merchant_name, revenue_share_percentage, contract_type')
+              .in('merchant_name', uniqueMerchants);
+
+            if (dbMerchants) {
+               dbMerchants.forEach(m => {
+                 metaMap.set(m.merchant_name, {
+                   share: m.revenue_share_percentage,
+                   type: m.contract_type
+                 });
+               });
+            }
+          }
+          
+          setMetadata(new Map(metaMap));
+          
+          const missing = uniqueMerchants.filter(m => !metaMap.has(m));
+          setMissingMerchants(missing);
+
+          setResults(processed);
+          setStats({
+            totalSales: totalSalesAccumulated,
+            totalMerchants: merchantSet.size,
+            totalVenues: new Set(processed.map(r => r._normalizedVenue)).size
+          });
+        } catch (err) {
+          console.error(err);
+          setError("Processing failed. Please check file format.");
+        } finally {
+          setIsProcessing(false);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } catch (err) {
+      setError("File read error.");
+      setIsProcessing(false);
+    }
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -317,6 +421,10 @@ const DataProcessor: React.FC = () => {
           </p>
 
           <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".xlsx,.xls" className="hidden" />
+          <input type="file" ref={preCalcFileInputRef} onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handlePreCalcFileProcess(file);
+          }} accept=".xlsx,.xls" className="hidden" />
           
           <div className="flex flex-col gap-4 w-full max-w-xs">
               <button 
@@ -327,7 +435,20 @@ const DataProcessor: React.FC = () => {
                 {isProcessing ? <Loader2 className="animate-spin" size={24} /> : (
                     <>
                         <FileSpreadsheet size={24} />
-                        <span>Select Excel Batch</span>
+                        <span>Master Batch</span>
+                    </>
+                )}
+              </button>
+
+              <button 
+                onClick={() => preCalcFileInputRef.current?.click()}
+                disabled={isProcessing}
+                className="w-full py-4 bg-blue-600 text-white rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-xl shadow-blue-200 active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3 text-lg"
+              >
+                {isProcessing ? <Loader2 className="animate-spin" size={24} /> : (
+                    <>
+                        <Banknote size={24} />
+                        <span>With Stripe Fees</span>
                     </>
                 )}
               </button>
