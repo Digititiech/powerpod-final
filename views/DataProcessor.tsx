@@ -13,7 +13,9 @@ import {
   FileDown,
   FileSpreadsheet,
   AlertTriangle,
-  Save
+  Save,
+  ChevronDown,
+  ChevronRight
 } from 'lucide-react';
 import { useSync } from '../lib/SyncContext';
 import { supabase } from '../lib/supabase';
@@ -40,8 +42,24 @@ const DataProcessor: React.FC = () => {
   const preCalcFileInputRef = useRef<HTMLInputElement>(null);
   const SAMPLE_FILE_URL = "#";
 
+  const [expandedYears, setExpandedYears] = useState<Set<string>>(new Set([new Date().getFullYear().toString()]));
+
+  const toggleYear = (year: string) => {
+    const newSet = new Set(expandedYears);
+    if (newSet.has(year)) {
+      newSet.delete(year);
+    } else {
+      newSet.add(year);
+    }
+    setExpandedYears(newSet);
+  };
+
   const distinctPeriods = useMemo(() => {
-    return Array.from(new Set(results.map(r => r['Report Month'] || 'Unknown'))).sort();
+    return Array.from(new Set(results.map(r => r['Report Month'] || 'Unknown'))).sort((a: any, b: any) => {
+      if (a === 'Unknown') return 1;
+      if (b === 'Unknown') return -1;
+      return new Date(String(a)).getTime() - new Date(String(b)).getTime();
+    });
   }, [results]);
 
   const periodStats = useMemo(() => {
@@ -97,6 +115,15 @@ const DataProcessor: React.FC = () => {
   };
 
   const handleFileProcess = async (file: File) => {
+    // Validate File Type
+    const fileName = file.name.toLowerCase();
+    const isExcel = fileName.endsWith('.xlsx') || fileName.endsWith('.xls');
+    
+    if (!isExcel) {
+      setError("Invalid file format. Please upload an Excel file (.xlsx or .xls)");
+      return;
+    }
+
     // @ts-ignore
     const XLSX = window.XLSX;
     if (!XLSX) {
@@ -243,6 +270,15 @@ const DataProcessor: React.FC = () => {
   };
 
   const handlePreCalcFileProcess = async (file: File) => {
+    // Validate File Type
+    const fileName = file.name.toLowerCase();
+    const isExcel = fileName.endsWith('.xlsx') || fileName.endsWith('.xls');
+    
+    if (!isExcel) {
+      setError("Invalid file format. Please upload an Excel file (.xlsx or .xls)");
+      return;
+    }
+
     // @ts-ignore
     const XLSX = window.XLSX;
     if (!XLSX) {
@@ -263,42 +299,123 @@ const DataProcessor: React.FC = () => {
           const data = evt.target?.result;
           const wb = XLSX.read(data, { type: 'array' });
           
-          const firstSheetName = wb.SheetNames[0];
-          const rawData = XLSX.utils.sheet_to_json(wb.Sheets[firstSheetName]);
+          // --- 1. Identify Sheets ---
+          const sheetNames = wb.SheetNames;
+          const orderSheetName = sheetNames.find((s: string) => s.toLowerCase().includes('order'));
+          const stripeSheetName = sheetNames.find((s: string) => s.toLowerCase().includes('stripe'));
+
+          if (!orderSheetName || !stripeSheetName) {
+            throw new Error(`Missing required sheets. Found: ${sheetNames.join(', ')}. Need 'Order' and 'Stripe'.`);
+          }
+
+          // --- 2. Build Stripe Lookup Map ---
+          const stripeData = XLSX.utils.sheet_to_json(wb.Sheets[stripeSheetName]);
+          const stripeMap = new Map<string, { amount: number, captured: boolean }>();
+
+          // Helper to normalize keys
+          const normalizeKey = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+          if (stripeData.length > 0) {
+            console.log("Stripe Sheet Headers:", Object.keys(stripeData[0]));
+          }
+
+          stripeData.forEach((row: any) => {
+            // Find key for "rent_id (metadata)"
+            const keys = Object.keys(row);
+            const rentIdKey = keys.find(k => normalizeKey(k).includes('rentid') || normalizeKey(k).includes('metadata'));
+            const capturedKey = keys.find(k => normalizeKey(k) === 'captured');
+            const amountKey = keys.find(k => normalizeKey(k) === 'amount');
+
+            if (rentIdKey && row[rentIdKey]) {
+              // FORCE STRING for ID comparison
+              const rentId = String(row[rentIdKey]).trim();
+              
+              // Robust Boolean Check
+              const capturedVal = row[capturedKey];
+              const isCaptured = 
+                capturedVal === true || 
+                String(capturedVal).toLowerCase() === 'true';
+
+              // Robust Amount Parse
+              const amountVal = parseFloat(String(row[amountKey]).replace(/[^0-9.-]/g, '')) || 0;
+              
+              stripeMap.set(rentId, { 
+                amount: amountVal, 
+                captured: isCaptured 
+              });
+            }
+          });
+          
+          console.log(`Stripe Map Size: ${stripeMap.size}`);
+          console.log("Sample Stripe Key:", Array.from(stripeMap.keys())[0]);
+
+          // --- 3. Process Orders Sheet ---
+          const rawData = XLSX.utils.sheet_to_json(wb.Sheets[orderSheetName]);
+          
+          if (rawData.length > 0) {
+            console.log("Order Sheet Headers:", Object.keys(rawData[0]));
+          }
 
           const processed: any[] = [];
           let totalSalesAccumulated = 0;
           const merchantSet = new Set<string>();
 
           rawData.forEach((row: any) => {
+            // Identify Keys
+            const keys = Object.keys(row);
+            const orderIdKey = keys.find(k => {
+               const n = normalizeKey(k);
+               return n === 'orderid' || n === 'id';
+            });
             const venueKey = getFuzzyKey(row, ['rental', 'venue']) || getFuzzyKey(row, ['venue']);
-            const amountKey = getFuzzyKey(row, ['actual', 'fee']) || getFuzzyKey(row, ['amount']);
-            const timeKey = getFuzzyKey(row, ['rental', 'time']) || getFuzzyKey(row, ['date']);
+            const timeKey = getFuzzyKey(row, ['rental', 'time']) || getFuzzyKey(row, ['date', 'created']);
             const stationKey = getFuzzyKey(row, ['rental', 'station']) || getFuzzyKey(row, ['station', 'name']);
-            const stripeFeeKey = getFuzzyKey(row, ['stripe', 'fee']);
+            
+            // FORCE STRING for ID comparison
+            const orderId = orderIdKey ? String(row[orderIdKey]).trim() : '';
             
             const rentalVenue = sanitizeValue(row[venueKey || '']);
             const rawDate = sanitizeValue(row[timeKey || '']);
-            const amount = parseFloat(sanitizeValue(row[amountKey || '']).replace(/[^0-9.-]/g, '')) || 0;
             const station = sanitizeValue(row[stationKey || '']);
             const merchant = extractMerchant(rentalVenue);
             const period = parsePeriod(rawDate);
             
-            // Use existing fee or 0
-            const stripeFee = stripeFeeKey ? (parseFloat(sanitizeValue(row[stripeFeeKey]).replace(/[^0-9.-]/g, '')) || 0) : 0;
+            // --- 4. Join with Stripe Data ---
+            let finalAmount = 0;
+            let isCaptured = false;
+
+            if (orderId && stripeMap.has(orderId)) {
+              const stripeInfo = stripeMap.get(orderId)!;
+              isCaptured = stripeInfo.captured;
+              if (isCaptured) {
+                finalAmount = stripeInfo.amount;
+              }
+            } else {
+               // Debugging first few misses
+               if (processed.length < 3) {
+                 console.log(`Missed Match! Order ID: '${orderId}' (Type: ${typeof orderId})`);
+               }
+            }
+
+            // Only add to processed list if it's a valid transaction (optional: include all?)
+            // We will include all but show 0 amount for uncaptured
             
             processed.push({
               ...row,
               'Merchant': merchant,
-              'Stripe Fees': Number(stripeFee.toFixed(2)),
+              'Stripe Fees': calculateStripeFee(finalAmount), // Re-calculate fees based on verified amount? Or use file?
+                                                              // User didn't specify, but usually fees depend on charged amount.
+                                                              // Let's assume standard calculation on the verified amount.
               'Report Month': period,
               '_normalizedVenue': rentalVenue,
               '_normalizedStation': station,
-              '_rawAmount': amount,
-              '_rawDate': rawDate
+              '_rawAmount': finalAmount,
+              '_rawDate': rawDate,
+              '_isCaptured': isCaptured,
+              '_orderId': orderId
             });
 
-            totalSalesAccumulated += amount;
+            totalSalesAccumulated += finalAmount;
             merchantSet.add(merchant);
           });
 
@@ -331,9 +448,9 @@ const DataProcessor: React.FC = () => {
             totalMerchants: merchantSet.size,
             totalVenues: new Set(processed.map(r => r._normalizedVenue)).size
           });
-        } catch (err) {
+        } catch (err: any) {
           console.error(err);
-          setError("Processing failed. Please check file format.");
+          setError(err.message || "Processing failed. Please check file format.");
         } finally {
           setIsProcessing(false);
         }
@@ -435,7 +552,7 @@ const DataProcessor: React.FC = () => {
                 {isProcessing ? <Loader2 className="animate-spin" size={24} /> : (
                     <>
                         <FileSpreadsheet size={24} />
-                        <span>Master Batch</span>
+                        <span>Old Batches (No Actual Stripe)</span>
                     </>
                 )}
               </button>
@@ -572,24 +689,46 @@ const DataProcessor: React.FC = () => {
                    <p className="text-2xl font-black text-gray-900 mb-2">{distinctPeriods.length}</p>
                    
                    {distinctPeriods.length > 0 && (
-                     <div className={`mt-3 ${distinctPeriods.length > 1 ? 'space-y-3' : 'flex flex-wrap gap-2'}`}>
-                       {distinctPeriods.map(period => (
-                         distinctPeriods.length > 1 ? (
-                           <div key={period} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
-                             <div className="flex justify-between items-center mb-2">
-                               <span className="text-[11px] font-black text-gray-600 uppercase tracking-wider">{period}</span>
-                               <span className="text-[9px] font-bold bg-blue-50 text-blue-600 px-2 py-1 rounded-lg uppercase tracking-wide">{periodStats[period].count} Records</span>
-                             </div>
-                             <div className="text-sm font-black text-gray-900">
-                               AED {periodStats[period].sales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                             </div>
-                           </div>
-                         ) : (
-                           <span key={period} className="px-2 py-1 bg-white border border-gray-200 rounded-lg text-[10px] font-bold text-gray-500 uppercase">
-                             {period}
-                           </span>
-                         )
-                       ))}
+                     <div className="mt-4 space-y-6">
+                       {Object.entries(
+                         distinctPeriods.reduce((acc, period) => {
+                           const year = period === 'Unknown' ? 'Unknown' : new Date(period).getFullYear().toString();
+                           if (!acc[year]) acc[year] = [];
+                           acc[year].push(period);
+                           return acc;
+                         }, {} as Record<string, string[]>)
+                       ).sort((a, b) => b[0].localeCompare(a[0])) // Sort years descending
+                        .map(([year, periods]) => (
+                          <div key={year} className="space-y-3">
+                            <button 
+                              onClick={() => toggleYear(year)}
+                              className="w-full flex items-center justify-between gap-3 group focus:outline-none"
+                            >
+                              <div className="h-px flex-1 bg-gray-200 group-hover:bg-gray-300 transition-colors"></div>
+                              <div className="flex items-center gap-2 text-xs font-black text-gray-400 group-hover:text-gray-600 uppercase tracking-widest transition-colors">
+                                {year}
+                                {expandedYears.has(year) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                              </div>
+                              <div className="h-px flex-1 bg-gray-200 group-hover:bg-gray-300 transition-colors"></div>
+                            </button>
+                            
+                            {expandedYears.has(year) && (
+                              <div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
+                                {(periods as string[]).map(period => (
+                                  <div key={period} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
+                                    <div className="flex justify-between items-center mb-2">
+                                      <span className="text-[11px] font-black text-gray-600 uppercase tracking-wider">{period}</span>
+                                      <span className="text-[9px] font-bold bg-blue-50 text-blue-600 px-2 py-1 rounded-lg uppercase tracking-wide">{periodStats[period].count} Records</span>
+                                    </div>
+                                    <div className="text-sm font-black text-gray-900">
+                                      AED {periodStats[period].sales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
                      </div>
                    )}
                  </div>
