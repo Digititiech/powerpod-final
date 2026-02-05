@@ -115,7 +115,7 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           const totalSales = data.sales;
           const stripeFees = data.fees;
           const grossSales = totalSales - stripeFees;
-          const taxAmount = grossSales * 0.05;
+          const taxAmount = totalSales * 0.05;
           const netSales = grossSales - taxAmount;
 
           let payable = 0;
@@ -154,7 +154,7 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                 order_id: String(r['Order ID'] || r['Order No'] || ''),
                 amount: rowSales,
                 stripe_fee: rowStripe,
-                tax_fee: rowGross * 0.05,
+                tax_fee: rowSales * 0.05,
                 transaction_date: String(r['_rawDate'] || ''),
                 venue_name: String(r['_normalizedVenue']),
                 station_name: String(r['_normalizedStation'] || r['Station Name'] || 'Unknown')

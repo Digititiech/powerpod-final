@@ -68,6 +68,10 @@ const MonthlyReports: React.FC = () => {
   const [availableMonths, setAvailableMonths] = useState<string[]>([]);
   const [selectedGlobalMonths, setSelectedGlobalMonths] = useState<string[]>([]);
   const [showMonthPicker, setShowMonthPicker] = useState(false);
+  
+  // Date Range Filtering
+  const [dateRange, setDateRange] = useState<{start: string, end: string}>({ start: '', end: '' });
+  const [transactionCache, setTransactionCache] = useState<Map<string, any[]>>(new Map());
   const [dispatchStatus, setDispatchStatus] = useState<{msg: string, logs: string[], type: 'loading' | 'success' | 'error'} | null>(null);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState<string | null>(null);
   const [updatingPaymentId, setUpdatingPaymentId] = useState<string | null>(null);
@@ -271,7 +275,7 @@ const MonthlyReports: React.FC = () => {
             const batch = summaryIds.slice(i, i + BATCH_SIZE);
             const { data: txData, error } = await supabase
                 .from('sales_transactions')
-                .select('summary_id, venue_name, station_name, amount')
+                .select('summary_id, venue_name, station_name, amount, stripe_fee, tax_fee, transaction_date')
                 .in('summary_id', batch)
                 .limit(5000);
             
@@ -279,7 +283,18 @@ const MonthlyReports: React.FC = () => {
                  console.error("Background fetch error batch:", error);
                  continue;
             }
-            if (txData) allTxData = [...allTxData, ...txData];
+            if (txData) {
+                allTxData = [...allTxData, ...txData];
+                setTransactionCache(prev => {
+                    const next = new Map(prev);
+                    txData.forEach((tx: any) => {
+                         if (!next.has(tx.summary_id)) next.set(tx.summary_id, []);
+                         const list = next.get(tx.summary_id) as any[];
+                         if (list) list.push(tx);
+                    });
+                    return next;
+                });
+            }
         }
 
         if (allTxData) {
@@ -506,11 +521,16 @@ const MonthlyReports: React.FC = () => {
     setLoadingDetails(true);
     setDetailTransactions([]);
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('sales_transactions')
         .select('*')
         .eq('summary_id', summary.id)
         .order('transaction_date', { ascending: false });
+
+      if (dateRange.start) query = query.gte('transaction_date', dateRange.start);
+      if (dateRange.end) query = query.lte('transaction_date', dateRange.end + ' 23:59:59');
+      
+      const { data, error } = await query;
       
       if (error) throw error;
       setDetailTransactions(data || []);
@@ -543,9 +563,74 @@ const MonthlyReports: React.FC = () => {
     return timeA - timeB; // Chronological Ascending (Oldest to Newest)
   };
 
+  const processedReports = useMemo(() => {
+    if (!dateRange.start && !dateRange.end) return reports;
+
+    const start = dateRange.start ? new Date(dateRange.start).getTime() : 0;
+    const end = dateRange.end ? new Date(dateRange.end).getTime() + (24 * 60 * 60 * 1000) - 1 : Infinity;
+
+    return reports.map(report => {
+        const txs = transactionCache.get(report.id);
+        
+        if (!txs) return report; 
+
+        const filteredTxs = txs.filter(tx => {
+            const tDate = new Date(tx.transaction_date).getTime();
+            return tDate >= start && tDate <= end;
+        });
+
+        const totalSales = filteredTxs.reduce((acc, t) => acc + (Number(t.amount) || 0), 0);
+        const stripeFees = filteredTxs.reduce((acc, t) => acc + (Number(t.stripe_fee) || 0), 0);
+        const taxAmount = totalSales * 0.05;
+        const netProfit = totalSales - stripeFees - taxAmount;
+        
+        let merchantPayable = 0;
+        const m = report.merchants;
+        if (m.contract_type === 'Fixed Charge - Monthly') {
+            merchantPayable = m.revenue_share_percentage;
+        } else {
+             merchantPayable = netProfit * (m.revenue_share_percentage / 100);
+        }
+
+        // Calculate stats on the fly
+        const vStats: Record<string, {sales: number, stations: Set<string>}> = {};
+        const uniqueStations = new Set<string>();
+        
+        filteredTxs.forEach(tx => {
+             const vName = tx.venue_name || 'Unknown Venue';
+             if (!vStats[vName]) vStats[vName] = { sales: 0, stations: new Set() };
+             vStats[vName].sales += (Number(tx.amount) || 0);
+             if (tx.station_name) {
+                 vStats[vName].stations.add(tx.station_name);
+                 uniqueStations.add(tx.station_name);
+             }
+        });
+
+        const computedVenueStats = Object.entries(vStats).map(([name, data]) => ({
+            name,
+            sales: data.sales,
+            stationCount: data.stations.size,
+            stations: Array.from(data.stations).sort()
+        })).sort((a, b) => b.sales - a.sales);
+
+        return {
+            ...report,
+            total_sales: totalSales,
+            stripe_fees: stripeFees,
+            tax_amount: taxAmount,
+            net_profit: netProfit,
+            merchant_payable: merchantPayable,
+            tx_count: filteredTxs.length,
+            computed_venue_stats: computedVenueStats,
+            unique_stations_count: uniqueStations.size,
+            unique_stations_list: Array.from(uniqueStations)
+        };
+    });
+  }, [reports, dateRange, transactionCache]);
+
 
   const filteredMerchantsList = useMemo(() => {
-    let baseData = reports;
+    let baseData = processedReports;
 
     // Apply Payment Filter
     if (paymentFilter === 'PENDING') {
@@ -643,7 +728,15 @@ const MonthlyReports: React.FC = () => {
         if (data) allTransactions = [...allTransactions, ...data];
     }
 
-    const transactions = allTransactions.sort((a: any, b: any) => 
+    const transactions = allTransactions
+        .filter(t => {
+            if (!dateRange.start && !dateRange.end) return true;
+            const tDate = new Date(t.transaction_date).getTime();
+            const start = dateRange.start ? new Date(dateRange.start).getTime() : 0;
+            const end = dateRange.end ? new Date(dateRange.end).getTime() + (24 * 60 * 60 * 1000) - 1 : Infinity;
+            return tDate >= start && tDate <= end;
+        })
+        .sort((a: any, b: any) => 
         new Date(a.transaction_date).getTime() - new Date(b.transaction_date).getTime()
     );
 
@@ -707,7 +800,8 @@ const MonthlyReports: React.FC = () => {
     doc.setFont('helvetica', 'normal');
     doc.text(`Dear ${mInfo.merchant.contact_name || mInfo.name.toUpperCase()} | ${mInfo.merchant.company_name?.toUpperCase() || mInfo.name.toUpperCase()}`, 15, currentY);
     currentY += 7;
-    doc.text(`Monthly Sales Report for ${mInfo.name.toUpperCase()} - Period(s): ${selected.join(', ')}`, 15, currentY);
+    const sortedSelected = [...selected].sort(sortMonths);
+    doc.text(`Monthly Sales Report for ${mInfo.name.toUpperCase()} - Period(s): ${sortedSelected.join(', ')}`, 15, currentY);
     currentY += 15;
 
     // Period Sales Details
@@ -775,7 +869,7 @@ const MonthlyReports: React.FC = () => {
 
     // Total Tax Fees
     doc.setFont('helvetica', 'normal');
-    doc.text('Total Tax Fees (Calculated 5%):', leftColX, currentY);
+    doc.text('Total Tax Fees (5% of Sales):', leftColX, currentY);
     doc.setTextColor(colorRed[0], colorRed[1], colorRed[2]);
     doc.setFont('helvetica', 'bold');
     doc.text(`AED ${f(totalTax)}`, rightColX, currentY);
@@ -943,7 +1037,6 @@ const MonthlyReports: React.FC = () => {
                 f(tx.stripe_fee),
                 f(tx.tax_fee),
                 f(net),
-                'Guest',
                 'Completed'
             ];
         });
@@ -951,7 +1044,7 @@ const MonthlyReports: React.FC = () => {
         // @ts-ignore
         doc.autoTable({
             startY: currentY,
-            head: [['Order ID', 'Station', 'Rental Time', 'Total', 'Stripe', 'Tax', 'Net', 'User', 'Status']],
+            head: [['Order ID', 'Station', 'Rental Time', 'Total', 'Stripe', 'Tax', 'Net', 'Status']],
             body: txRows,
             theme: 'striped',
             headStyles: { fillColor: [50, 50, 50], textColor: 255 },
@@ -1204,10 +1297,15 @@ const MonthlyReports: React.FC = () => {
       
       for (let i = 0; i < summaryIds.length; i += BATCH_SIZE) {
           const batch = summaryIds.slice(i, i + BATCH_SIZE);
-          const { data } = await supabase
+          let query = supabase
             .from('sales_transactions')
-            .select('summary_id, station_name')
+            .select('summary_id, station_name, transaction_date')
             .in('summary_id', batch);
+          
+          if (dateRange.start) query = query.gte('transaction_date', dateRange.start);
+          if (dateRange.end) query = query.lte('transaction_date', dateRange.end + ' 23:59:59');
+
+          const { data } = await query;
           
           if (data) allTxs = [...allTxs, ...data];
       }
@@ -1423,6 +1521,37 @@ const MonthlyReports: React.FC = () => {
           <button onClick={() => fetchReports(true)} className="p-3 bg-white border border-gray-100 rounded-2xl text-gray-400 hover:text-blue-600 transition-all shadow-sm">
             <RefreshCw size={20} className={loading ? 'animate-spin' : ''} />
           </button>
+          
+          {/* Date Filter */}
+          <div className="flex items-center space-x-2 bg-white border border-gray-100 rounded-2xl p-1 shadow-sm">
+                <div className="flex items-center px-3 border-r border-gray-100">
+                     <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest mr-2">From</span>
+                     <input 
+                      type="date" 
+                      value={dateRange.start}
+                      onChange={(e) => setDateRange(prev => ({ ...prev, start: e.target.value }))}
+                      className="py-2 text-sm font-bold border-none outline-none text-gray-700 bg-transparent"
+                    />
+                </div>
+                <div className="flex items-center px-3">
+                     <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest mr-2">To</span>
+                     <input 
+                      type="date" 
+                      value={dateRange.end}
+                      onChange={(e) => setDateRange(prev => ({ ...prev, end: e.target.value }))}
+                      className="py-2 text-sm font-bold border-none outline-none text-gray-700 bg-transparent"
+                    />
+                </div>
+                 {(dateRange.start || dateRange.end) && (
+                    <button 
+                        onClick={() => setDateRange({ start: '', end: '' })}
+                        className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-red-500 transition-colors"
+                    >
+                        <CloseIcon size={14} />
+                    </button>
+                 )}
+          </div>
+
           <div className="relative" ref={monthPickerRef}>
             <button onClick={() => setShowMonthPicker(!showMonthPicker)} className="flex items-center space-x-3 px-6 py-3 bg-white border border-gray-100 rounded-2xl text-sm font-bold hover:border-blue-200 transition-all shadow-sm min-w-[200px]">
               <Calendar size={18} className="text-blue-500" />
@@ -1585,18 +1714,18 @@ const MonthlyReports: React.FC = () => {
                     </div>
                     <div>
                         <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Sales Records</p>
-                        <p className="text-xl font-black text-gray-900">{relevantPeriods.reduce((acc, p) => acc + (transactionCounts[p.id] || 0), 0)}</p>
+                        <p className="text-xl font-black text-gray-900">{relevantPeriods.reduce((acc, p) => acc + (p.tx_count ?? transactionCounts[p.id] ?? 0), 0)}</p>
                     </div>
                     <div>
                         <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Venues</p>
                         <p className="text-xl font-black text-gray-900">
-                            {new Set(relevantPeriods.flatMap(p => venueStats[p.id]?.map(v => v.name) || [])).size}
+                            {new Set(relevantPeriods.flatMap(p => p.computed_venue_stats?.map((v: any) => v.name) ?? venueStats[p.id]?.map(v => v.name) ?? [])).size}
                         </p>
                     </div>
                     <div>
                          <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Total Stations</p>
                          <p className="text-xl font-black text-gray-900">
-                             {new Set(relevantPeriods.flatMap(p => periodStations[p.id] || [])).size}
+                             {new Set(relevantPeriods.flatMap(p => p.unique_stations_list ?? periodStations[p.id] ?? [])).size}
                          </p>
                     </div>
                 </div>
@@ -1605,14 +1734,14 @@ const MonthlyReports: React.FC = () => {
                 {(() => {
                     const uniqueVenues = new Map<string, {name: string, stationCount: number, stations: Set<string>}>();
                     relevantPeriods.forEach(p => {
-                        const stats = venueStats[p.id] || [];
-                        stats.forEach(v => {
+                        const stats = p.computed_venue_stats || venueStats[p.id] || [];
+                        stats.forEach((v: any) => {
                             if (!uniqueVenues.has(v.name)) {
                                 uniqueVenues.set(v.name, { name: v.name, stationCount: 0, stations: new Set() });
                             }
                             const current = uniqueVenues.get(v.name)!;
                             current.stationCount = Math.max(current.stationCount, v.stationCount);
-                            if (v.stations) v.stations.forEach(s => current.stations.add(s));
+                            if (v.stations) v.stations.forEach((s: string) => current.stations.add(s));
                         });
                     });
                     const merchantVenueList = Array.from(uniqueVenues.values()).sort((a, b) => b.stationCount - a.stationCount);

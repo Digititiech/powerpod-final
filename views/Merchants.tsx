@@ -157,9 +157,12 @@ const Merchants: React.FC = () => {
              for (const summary of summaries) {
                 let payable = 0;
                 
+                // Calculate Tax (5% of Total Sales)
+                const newTaxAmount = (summary.total_sales || 0) * 0.05;
+
                 // Calculate Gross Sales (Net Revenue available for split)
                 // Formula: Gross Sales = Actual Fee (Total Sales) - Stripe Fee - Tax
-                const calculatedGrossSales = (summary.total_sales || 0) - (summary.stripe_fees || 0) - (summary.tax_amount || 0);
+                const calculatedGrossSales = (summary.total_sales || 0) - (summary.stripe_fees || 0) - newTaxAmount;
 
                 if (editingMerchant.contract_type === 'Fixed Charge - Monthly') {
                    // Fixed Charge: Gross Sales - Monthly Fixed Charge
@@ -175,6 +178,7 @@ const Merchants: React.FC = () => {
                 const { error: updateError } = await supabase
                   .from('merchant_period_summaries')
                   .update({ 
+                      tax_amount: newTaxAmount,
                       merchant_payable: payable,
                       net_profit: netIncome 
                   })
