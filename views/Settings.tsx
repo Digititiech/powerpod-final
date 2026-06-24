@@ -21,8 +21,10 @@ import {
 } from 'lucide-react';
 
 import { supabase } from '../lib/supabase';
+import { useAccessControl } from '../lib/AccessControlContext';
 
 const Settings: React.FC = () => {
+  const { hasFeature } = useAccessControl();
   const [activeTab, setActiveTab] = useState<'identity' | 'email' | 'whatsapp' | 'docs'>('identity');
   const [isSaving, setIsSaving] = useState(false);
   
@@ -47,10 +49,15 @@ const Settings: React.FC = () => {
   const [connectedNumber, setConnectedNumber] = useState<string | null>(null);
   const [serverError, setServerError] = useState<boolean>(false);
 
+  const canCommit = hasFeature('settings.commit');
+  const canTestDb = hasFeature('settings.db.test');
+  const canViewWhatsApp = hasFeature('settings.whatsapp.view');
+  const canDisconnectWhatsApp = hasFeature('settings.whatsapp.disconnect');
+
   // Poll WhatsApp status
   useEffect(() => {
     let interval: any;
-    if (activeTab === 'whatsapp') {
+    if (activeTab === 'whatsapp' && canViewWhatsApp) {
         const checkStatus = async () => {
             try {
                 const res = await fetch(`${API_BASE_URL}/whatsapp-status`, {
@@ -72,9 +79,19 @@ const Settings: React.FC = () => {
         interval = setInterval(checkStatus, 3000);
     }
     return () => clearInterval(interval);
-  }, [activeTab]);
+  }, [activeTab, canViewWhatsApp]);
+
+  useEffect(() => {
+    if (activeTab === 'whatsapp' && !canViewWhatsApp) {
+      setActiveTab('identity');
+    }
+  }, [activeTab, canViewWhatsApp]);
 
   const testDbConnection = async () => {
+    if (!canTestDb) {
+      alert('Access denied: Test DB Connection is disabled for your identity.');
+      return;
+    }
     setDbStatus('testing');
     setDbError(null);
     try {
@@ -92,6 +109,10 @@ const Settings: React.FC = () => {
   };
 
   const handleDisconnectWhatsApp = async () => {
+    if (!canDisconnectWhatsApp) {
+      alert('Access denied: Disconnect WhatsApp Gateway is disabled for your identity.');
+      return;
+    }
     if (!confirm('Are you sure you want to disconnect WhatsApp? You will need to scan the QR code again to reconnect.')) return;
     
     try {
@@ -119,6 +140,10 @@ const Settings: React.FC = () => {
   };
 
   const handleSave = () => {
+    if (!canCommit) {
+      alert('Access denied: Commit Settings Changes is disabled for your identity.');
+      return;
+    }
     setIsSaving(true);
     setTimeout(() => {
       setIsSaving(false);
@@ -135,7 +160,7 @@ const Settings: React.FC = () => {
         </div>
         <button 
           onClick={handleSave}
-          disabled={isSaving}
+          disabled={!canCommit || isSaving}
           className="bg-blue-600 text-white px-10 py-4 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20 active:scale-95 flex items-center space-x-3"
         >
           {isSaving ? <RefreshCw className="animate-spin" size={16} /> : <Save size={16} />}
@@ -157,7 +182,11 @@ const Settings: React.FC = () => {
           Email Gateway
         </button>
         <button 
-          onClick={() => setActiveTab('whatsapp')}
+          onClick={() => {
+            if (!canViewWhatsApp) return;
+            setActiveTab('whatsapp');
+          }}
+          disabled={!canViewWhatsApp}
           className={`px-8 py-3 rounded-[20px] text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${activeTab === 'whatsapp' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
         >
           WhatsApp Gateway
@@ -315,6 +344,7 @@ const Settings: React.FC = () => {
                          
                          <button 
                             onClick={handleDisconnectWhatsApp}
+                            disabled={!canDisconnectWhatsApp}
                             className="mt-6 px-6 py-3 bg-red-100 text-red-600 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-red-200 transition-all flex items-center space-x-2"
                          >
                            <LogOut size={14} />
@@ -349,6 +379,7 @@ const Settings: React.FC = () => {
                          {/* Emergency Reset Button for Stuck States */}
                          <button 
                             onClick={handleDisconnectWhatsApp}
+                            disabled={!canDisconnectWhatsApp}
                             className="mt-8 text-gray-400 hover:text-red-500 text-[10px] font-bold uppercase tracking-widest transition-colors flex items-center space-x-1"
                          >
                            <RefreshCw size={10} />
@@ -427,7 +458,7 @@ const Settings: React.FC = () => {
 
             <button 
               onClick={testDbConnection}
-              disabled={dbStatus === 'testing'}
+              disabled={!canTestDb || dbStatus === 'testing'}
               className={`w-full mt-4 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center space-x-2
                 ${dbStatus === 'success' ? 'bg-green-500/20 text-green-300 hover:bg-green-500/30' : 
                   dbStatus === 'error' ? 'bg-red-500/20 text-red-300 hover:bg-red-500/30' : 

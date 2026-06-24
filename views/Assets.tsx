@@ -14,8 +14,10 @@ import {
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Station } from '../types';
+import { useAccessControl } from '../lib/AccessControlContext';
 
 const Assets: React.FC = () => {
+  const { hasFeature } = useAccessControl();
   const [stations, setStations] = useState<Station[]>([]);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({ active: 0, maintenance: 0, offline: 0 });
@@ -48,6 +50,19 @@ const Assets: React.FC = () => {
     }
   };
 
+  if (!hasFeature('nav.assets')) {
+    return (
+      <div className="space-y-6 animate-in fade-in duration-500 pb-20">
+        <div className="bg-white p-10 rounded-[40px] border border-gray-100 shadow-sm">
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Access Restricted</h1>
+          <p className="text-gray-500 mt-2 font-medium">
+            Assets is disabled for your identity. Ask an administrator to enable it.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
       <div className="flex justify-between items-center">
@@ -62,10 +77,12 @@ const Assets: React.FC = () => {
           >
             <RefreshCw size={20} className={loading ? 'animate-spin' : ''} />
           </button>
-          <button className="bg-blue-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20 active:scale-95 flex items-center space-x-2">
-            <Cpu size={20} />
-            <span>Deploy New Station</span>
-          </button>
+          {hasFeature('assets.deploy') && (
+            <button className="bg-blue-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20 active:scale-95 flex items-center space-x-2">
+              <Cpu size={20} />
+              <span>Deploy New Station</span>
+            </button>
+          )}
         </div>
       </div>
 

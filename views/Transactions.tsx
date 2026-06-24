@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import { useAccessControl } from '../lib/AccessControlContext';
 import { 
   Search, 
   Filter, 
@@ -10,7 +11,12 @@ import {
   Building2,
   Calendar,
   CreditCard,
-  MapPin
+  MapPin,
+  Trash2,
+  Loader2,
+  CheckSquare,
+  Square,
+  AlertTriangle
 } from 'lucide-react';
 
 interface Transaction {
@@ -28,15 +34,23 @@ interface Transaction {
 }
 
 const Transactions: React.FC = () => {
+  const { hasFeature } = useAccessControl();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [page, setPage] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isDeleting, setIsDeleting] = useState(false);
   const pageSize = 50;
 
   useEffect(() => {
     fetchTransactions();
+  }, [page, searchTerm]);
+
+  // Reset selection when page or search changes
+  useEffect(() => {
+    setSelectedIds(new Set());
   }, [page, searchTerm]);
 
   const fetchTransactions = async () => {
@@ -98,6 +112,85 @@ const Transactions: React.FC = () => {
     XLSX.writeFile(wb, "transactions_export.xlsx");
   };
 
+  const toggleSelectAll = () => {
+    if (selectedIds.size === transactions.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(transactions.map(t => t.id)));
+    }
+  };
+
+  const toggleSelect = (id: string) => {
+    const newSelected = new Set(selectedIds);
+    if (newSelected.has(id)) {
+      newSelected.delete(id);
+    } else {
+      newSelected.add(id);
+    }
+    setSelectedIds(newSelected);
+  };
+
+  const handleDeleteSelected = async () => {
+    if (!hasFeature('transactions.delete.selected')) {
+      alert('Access denied: Delete Selected Transactions is disabled for your identity.');
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to delete ${selectedIds.size} transactions? This cannot be undone.`)) return;
+    
+    setIsDeleting(true);
+    try {
+      const { error } = await supabase
+        .from('sales_transactions')
+        .delete()
+        .in('id', Array.from(selectedIds));
+
+      if (error) throw error;
+      
+      setSelectedIds(new Set());
+      fetchTransactions();
+    } catch (e) {
+      console.error('Failed to delete transactions', e);
+      alert('Failed to delete transactions');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleDeleteAll = async () => {
+    if (!hasFeature('transactions.delete.all')) {
+      alert('Access denied: Delete All Transactions is disabled for your identity.');
+      return;
+    }
+    const confirmMessage = searchTerm 
+      ? `Are you sure you want to delete ALL ${totalCount} transactions matching "${searchTerm}"? This cannot be undone.`
+      : `Are you sure you want to delete ALL ${totalCount} transactions? This cannot be undone.`;
+      
+    if (!window.confirm(confirmMessage)) return;
+    
+    setIsDeleting(true);
+    try {
+      let query = supabase.from('sales_transactions').delete();
+      
+      if (searchTerm) {
+         query = query.or(`order_id.ilike.%${searchTerm}%,venue_name.ilike.%${searchTerm}%,station_name.ilike.%${searchTerm}%`);
+      } else {
+         // Safety: Ensure we are deleting everything by using a condition that is always true but valid for Supabase
+         query = query.neq('id', '00000000-0000-0000-0000-000000000000'); 
+      }
+      
+      const { error } = await query;
+      if (error) throw error;
+      
+      setPage(0);
+      fetchTransactions();
+    } catch (e) {
+      console.error('Failed to delete all transactions', e);
+      alert('Failed to delete transactions');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const totalPages = Math.ceil(totalCount / pageSize);
 
   return (
@@ -107,13 +200,38 @@ const Transactions: React.FC = () => {
           <h1 className="text-3xl font-black text-gray-900 tracking-tight">Transactions</h1>
           <p className="text-gray-500 mt-1 font-medium">View and manage all sales transactions across merchants.</p>
         </div>
-        <button 
-          onClick={handleExport}
-          className="px-6 py-3 bg-white border border-gray-200 text-gray-700 rounded-xl font-bold hover:bg-gray-50 transition-all flex items-center space-x-2 shadow-sm"
-        >
-          <Download size={18} />
-          <span>Export Data</span>
-        </button>
+        <div className="flex items-center space-x-3 bg-gray-50 p-2 rounded-xl border border-gray-100">
+          <span className="text-xs font-bold text-gray-400 uppercase tracking-wider mr-2">Actions:</span>
+          {hasFeature('transactions.delete.selected') && selectedIds.size > 0 && (
+            <button 
+              onClick={handleDeleteSelected}
+              disabled={isDeleting}
+              className="px-6 py-3 bg-red-50 text-red-600 border border-red-100 rounded-xl font-bold hover:bg-red-100 transition-all flex items-center space-x-2 shadow-sm animate-in fade-in zoom-in duration-300"
+            >
+              {isDeleting ? <Loader2 size={18} className="animate-spin" /> : <Trash2 size={18} />}
+              <span>Delete Selected ({selectedIds.size})</span>
+            </button>
+          )}
+          
+          {hasFeature('transactions.delete.all') && (
+            <button 
+              onClick={handleDeleteAll}
+              disabled={isDeleting || totalCount === 0}
+              className="px-6 py-3 bg-white text-red-600 border border-red-100 rounded-xl font-bold hover:bg-red-50 transition-all flex items-center space-x-2 shadow-sm"
+            >
+              {isDeleting ? <Loader2 size={18} className="animate-spin" /> : <AlertTriangle size={18} />}
+              <span>Delete All Results</span>
+            </button>
+          )}
+
+          <button 
+            onClick={handleExport}
+            className="px-6 py-3 bg-white border border-gray-200 text-gray-700 rounded-xl font-bold hover:bg-gray-50 transition-all flex items-center space-x-2 shadow-sm"
+          >
+            <Download size={18} />
+            <span>Export Data</span>
+          </button>
+        </div>
       </div>
 
       <div className="bg-white rounded-[40px] border border-gray-100 shadow-sm overflow-hidden">
@@ -137,6 +255,18 @@ const Transactions: React.FC = () => {
           <table className="w-full text-left">
             <thead className="bg-white border-b border-gray-100">
               <tr className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                <th className="px-8 py-5 w-12">
+                  <button 
+                    onClick={toggleSelectAll}
+                    className="p-1 rounded hover:bg-gray-100 transition-colors"
+                  >
+                    {transactions.length > 0 && selectedIds.size === transactions.length ? (
+                      <CheckSquare size={16} className="text-blue-600" />
+                    ) : (
+                      <Square size={16} className="text-gray-300" />
+                    )}
+                  </button>
+                </th>
                 <th className="px-8 py-5">Date / Order ID</th>
                 <th className="px-8 py-5">Merchant / Venue</th>
                 <th className="px-8 py-5">Station</th>
@@ -148,19 +278,31 @@ const Transactions: React.FC = () => {
             <tbody className="divide-y divide-gray-50">
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="px-8 py-12 text-center text-gray-500">
+                  <td colSpan={7} className="px-8 py-12 text-center text-gray-500">
                     Loading transactions...
                   </td>
                 </tr>
               ) : transactions.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-8 py-12 text-center text-gray-500">
+                  <td colSpan={7} className="px-8 py-12 text-center text-gray-500">
                     No transactions found.
                   </td>
                 </tr>
               ) : (
                 transactions.map((t) => (
-                  <tr key={t.id} className="hover:bg-gray-50/50 transition-colors">
+                  <tr key={t.id} className={`hover:bg-gray-50/50 transition-colors ${selectedIds.has(t.id) ? 'bg-blue-50/30' : ''}`}>
+                    <td className="px-8 py-5">
+                      <button 
+                        onClick={() => toggleSelect(t.id)}
+                        className="p-1 rounded hover:bg-gray-100 transition-colors"
+                      >
+                        {selectedIds.has(t.id) ? (
+                          <CheckSquare size={16} className="text-blue-600" />
+                        ) : (
+                          <Square size={16} className="text-gray-300" />
+                        )}
+                      </button>
+                    </td>
                     <td className="px-8 py-5">
                       <div className="flex items-center space-x-3">
                         <div className="p-2 bg-blue-50 text-blue-600 rounded-lg">

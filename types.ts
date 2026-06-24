@@ -3,11 +3,43 @@ export type UserRole = 'admin' | 'staff' | 'technician';
 
 export type View = 'dashboard' | 'merchants' | 'assets' | 'processor' | 'reports' | 'settings' | 'users' | 'transactions';
 
+export type FeatureKey =
+  | 'mode.viewOnly'
+  | 'nav.dashboard'
+  | 'nav.merchants'
+  | 'nav.assets'
+  | 'nav.processor'
+  | 'nav.reports'
+  | 'nav.identity'
+  | 'nav.settings'
+  | 'dashboard.transactions.view'
+  | 'dashboard.audit.download'
+  | 'assets.deploy'
+  | 'merchants.edit'
+  | 'processor.upload'
+  | 'processor.sync'
+  | 'reports.view'
+  | 'reports.payment.toggle'
+  | 'reports.send.email'
+  | 'reports.send.whatsapp'
+  | 'transactions.delete.selected'
+  | 'transactions.delete.all'
+  | 'identity.view'
+  | 'identity.user.create'
+  | 'identity.features.edit'
+  | 'settings.commit'
+  | 'settings.db.test'
+  | 'settings.whatsapp.view'
+  | 'settings.whatsapp.disconnect';
+
+export type FeatureFlags = Partial<Record<FeatureKey, boolean>> & Record<string, boolean>;
+
 export interface Profile {
   id: string;
   full_name: string;
   email: string;
   role: UserRole;
+  feature_flags?: FeatureFlags | null;
   created_at: string;
   updated_at: string;
 }
@@ -18,7 +50,9 @@ export interface Merchant {
   company_name: string;
   contact_name?: string; // New field added
   email: string;
+  reporting_email?: string;
   phone: string;
+  reporting_whatsapp?: string;
   bank_name: string;
   bank_account_number: string;
   iban: string;

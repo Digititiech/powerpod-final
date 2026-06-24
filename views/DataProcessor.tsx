@@ -17,8 +17,10 @@ import {
 } from 'lucide-react';
 import { useSync } from '../lib/SyncContext';
 import { supabase } from '../lib/supabase';
+import { useAccessControl } from '../lib/AccessControlContext';
 
 const DataProcessor: React.FC = () => {
+  const { hasFeature } = useAccessControl();
   const { 
     isSyncing, 
     status, 
@@ -96,6 +98,11 @@ const DataProcessor: React.FC = () => {
   };
 
   const handleUnifiedProcess = async (file: File) => {
+    if (!hasFeature('processor.upload')) {
+      setError('Access denied: Upload Excel Files is disabled for your identity.');
+      return;
+    }
+
     // @ts-ignore
     const XLSX = window.XLSX;
     if (!XLSX) {
@@ -408,7 +415,7 @@ const DataProcessor: React.FC = () => {
           <div className="flex flex-col gap-4 w-full max-w-xs">
               <button 
                 onClick={() => fileInputRef.current?.click()}
-                disabled={isProcessing}
+                disabled={!hasFeature('processor.upload') || isProcessing}
                 className="w-full py-4 bg-gray-900 text-white rounded-2xl font-bold hover:bg-black transition-all shadow-xl shadow-gray-200 active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3 text-lg"
               >
                 {isProcessing ? <Loader2 className="animate-spin" size={24} /> : (
@@ -463,8 +470,14 @@ const DataProcessor: React.FC = () => {
                   Ingestion Preview
                 </h3>
                 <button 
-                  onClick={runSync}
-                  disabled={isSyncing || missingMerchants.length > 0}
+                  onClick={() => {
+                    if (!hasFeature('processor.sync')) {
+                      setError('Access denied: Sync Processed Data is disabled for your identity.');
+                      return;
+                    }
+                    runSync();
+                  }}
+                  disabled={!hasFeature('processor.sync') || isSyncing || missingMerchants.length > 0}
                   className={`px-8 py-4 rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-xl flex items-center space-x-2 ${
                     isSyncing ? 'bg-blue-100 text-blue-600' : 
                     missingMerchants.length > 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' :

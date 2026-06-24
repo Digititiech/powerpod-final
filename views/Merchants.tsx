@@ -25,8 +25,10 @@ import {
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Merchant } from '../types';
+import { useAccessControl } from '../lib/AccessControlContext';
 
 const Merchants: React.FC = () => {
+  const { hasFeature } = useAccessControl();
   const [merchants, setMerchants] = useState<Merchant[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -112,6 +114,10 @@ const Merchants: React.FC = () => {
 
     setIsSaving(true);
     try {
+      if (!hasFeature('merchants.edit')) {
+        throw new Error('Access denied: Edit Merchants feature is disabled for your identity.');
+      }
+
       const { error: updateError } = await supabase
         .from('merchants')
         .update({
@@ -127,6 +133,8 @@ const Merchants: React.FC = () => {
           merchant_name: editingMerchant.merchant_name,
           trn: editingMerchant.trn,
           reporting_preference: editingMerchant.reporting_preference,
+          reporting_email: editingMerchant.reporting_email,
+          reporting_whatsapp: editingMerchant.reporting_whatsapp,
           notes: editingMerchant.notes,
           payment_duration: editingMerchant.payment_duration
         })
@@ -215,10 +223,12 @@ const Merchants: React.FC = () => {
           <h1 className="text-3xl font-black text-gray-900 tracking-tight">Partners</h1>
           <p className="text-gray-500 mt-1 font-medium">Merchant ecosystem and synchronized contract terms.</p>
         </div>
-        <button className="bg-blue-600 text-white px-8 py-3 rounded-2xl font-bold hover:bg-blue-700 transition-all flex items-center space-x-2 shadow-xl shadow-blue-500/20 active:scale-95">
-          <Plus size={20} />
-          <span>Onboard Merchant</span>
-        </button>
+        {hasFeature('merchants.edit') && (
+          <button className="bg-blue-600 text-white px-8 py-3 rounded-2xl font-bold hover:bg-blue-700 transition-all flex items-center space-x-2 shadow-xl shadow-blue-500/20 active:scale-95">
+            <Plus size={20} />
+            <span>Onboard Merchant</span>
+          </button>
+        )}
       </div>
 
       <div className="bg-white p-5 rounded-[28px] border border-gray-100 shadow-sm flex items-center space-x-4">
@@ -269,12 +279,14 @@ const Merchants: React.FC = () => {
                             {merchant.reporting_preference}
                         </span>
                       )}
-                      <button 
-                        onClick={() => handleEditClick(merchant)}
-                        className="text-gray-300 hover:text-blue-600 p-2 transition-colors"
-                      >
-                        <Edit2 size={18} />
-                      </button>
+                      {hasFeature('merchants.edit') && (
+                        <button 
+                          onClick={() => handleEditClick(merchant)}
+                          className="text-gray-300 hover:text-blue-600 p-2 transition-colors"
+                        >
+                          <Edit2 size={18} />
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -418,6 +430,27 @@ const Merchants: React.FC = () => {
                             <option value="whatsapp">WhatsApp</option>
                         </select>
                     </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Reporting Email</label>
+                        <input 
+                          type="email"
+                          className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                          value={editingMerchant.reporting_email || ''}
+                          onChange={(e) => setEditingMerchant({...editingMerchant, reporting_email: e.target.value})}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Reporting WhatsApp</label>
+                        <input 
+                          type="text"
+                          placeholder="e.g. 0501234567 or 971501234567"
+                          className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                          value={editingMerchant.reporting_whatsapp || ''}
+                          onChange={(e) => setEditingMerchant({...editingMerchant, reporting_whatsapp: e.target.value})}
+                        />
+                      </div>
+                    </div>
                     <div className="space-y-2">
                         <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Notes</label>
                         <textarea 
@@ -524,9 +557,24 @@ const Merchants: React.FC = () => {
                           )}
                           <input 
                             type="number"
+                            min={0}
+                            max={editingMerchant.contract_type === 'Fixed Charge - Monthly' ? undefined : 100}
+                            step={editingMerchant.contract_type === 'Fixed Charge - Monthly' ? 0.01 : 1}
                             className="w-full bg-gray-50 border-none pl-10 pr-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
                             value={editingMerchant.revenue_share_percentage}
-                            onChange={(e) => setEditingMerchant({...editingMerchant, revenue_share_percentage: Number(e.target.value)})}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              const next = raw === '' ? 0 : Number(raw);
+                              if (Number.isNaN(next)) return;
+
+                              if (editingMerchant.contract_type === 'Fixed Charge - Monthly') {
+                                setEditingMerchant({ ...editingMerchant, revenue_share_percentage: next });
+                                return;
+                              }
+
+                              const clamped = Math.min(100, Math.max(0, next));
+                              setEditingMerchant({ ...editingMerchant, revenue_share_percentage: clamped });
+                            }}
                           />
                         </div>
                       </div>

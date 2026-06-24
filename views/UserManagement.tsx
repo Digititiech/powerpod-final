@@ -15,17 +15,25 @@ import {
   ShieldAlert,
   Zap,
   Hammer,
-  AtSign
+  AtSign,
+  SlidersHorizontal
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Profile, UserRole } from '../types';
+import { FeatureKey, Profile, UserRole } from '../types';
+import { useAccessControl } from '../lib/AccessControlContext';
+import { FEATURE_DEFINITIONS, resolveFeatureFlags, toFullStoredFlags } from '../lib/featureFlags';
 
 const UserManagement: React.FC = () => {
+  const { hasFeature } = useAccessControl();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [selectedProfile, setSelectedProfile] = useState<Profile | null>(null);
+  const [isFeatureModalOpen, setIsFeatureModalOpen] = useState(false);
+  const [featureEdits, setFeatureEdits] = useState<Record<FeatureKey, boolean> | null>(null);
+  const [isSavingFeatures, setIsSavingFeatures] = useState(false);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -63,6 +71,10 @@ const UserManagement: React.FC = () => {
     setSuccess(null);
 
     try {
+      if (!hasFeature('identity.user.create')) {
+        throw new Error('Access denied: Create Users feature is disabled for your identity.');
+      }
+
       // 1. Create Auth User with Redirect Configuration
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email: formData.email,
@@ -80,17 +92,31 @@ const UserManagement: React.FC = () => {
 
       // 2. Manually upsert to profiles if trigger didn't handle it or for explicit role setting
       if (authData.user) {
-        const { error: profileError } = await supabase
-          .from('profiles')
-          .insert({
-            id: authData.user.id,
-            full_name: formData.fullName,
-            email: formData.email,
-            role: formData.role
-          });
-        
+        const initialFeatureFlags = toFullStoredFlags(resolveFeatureFlags(formData.role, null));
+        const { error: profileError } = await supabase.from('profiles').insert({
+          id: authData.user.id,
+          full_name: formData.fullName,
+          email: formData.email,
+          role: formData.role,
+          feature_flags: initialFeatureFlags,
+        });
+
         if (profileError) {
-          if (!profileError.message.includes('duplicate')) throw profileError;
+          const msg = profileError.message || '';
+          const missingColumn = msg.toLowerCase().includes('feature_flags') && msg.toLowerCase().includes('column');
+          if (missingColumn) {
+            const { error: fallbackError } = await supabase.from('profiles').insert({
+              id: authData.user.id,
+              full_name: formData.fullName,
+              email: formData.email,
+              role: formData.role,
+            });
+            if (fallbackError) {
+              if (!fallbackError.message.includes('duplicate')) throw fallbackError;
+            }
+          } else if (!msg.includes('duplicate')) {
+            throw profileError;
+          }
         }
       }
 
@@ -101,6 +127,52 @@ const UserManagement: React.FC = () => {
       setError(err.message || 'Failed to create user authority.');
     } finally {
       setIsCreating(false);
+    }
+  };
+
+  const openFeatureEditor = (profile: Profile) => {
+    if (!hasFeature('identity.features.edit')) {
+      setError('Access denied: Edit User Features is disabled for your identity.');
+      return;
+    }
+
+    setError(null);
+    setSelectedProfile(profile);
+    setFeatureEdits(resolveFeatureFlags(profile.role, profile.feature_flags ?? null));
+    setIsFeatureModalOpen(true);
+  };
+
+  const saveFeatureEdits = async () => {
+    if (!selectedProfile || !featureEdits) return;
+
+    setIsSavingFeatures(true);
+    setError(null);
+    try {
+      const payload = toFullStoredFlags(featureEdits);
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ feature_flags: payload })
+        .eq('id', selectedProfile.id);
+
+      if (updateError) {
+        const msg = updateError.message || '';
+        const missingColumn = msg.toLowerCase().includes('feature_flags') && msg.toLowerCase().includes('column');
+        if (missingColumn) {
+          throw new Error('Database missing feature_flags column. Apply supabase_feature_flags.sql first.');
+        }
+        throw updateError;
+      }
+
+      setProfiles(prev =>
+        prev.map(p => (p.id === selectedProfile.id ? { ...p, feature_flags: payload } : p)),
+      );
+      setIsFeatureModalOpen(false);
+      setSelectedProfile(null);
+      setFeatureEdits(null);
+    } catch (e: any) {
+      setError(e.message || 'Failed to update feature flags.');
+    } finally {
+      setIsSavingFeatures(false);
     }
   };
 
@@ -129,6 +201,19 @@ const UserManagement: React.FC = () => {
         );
     }
   };
+
+  if (!hasFeature('identity.view')) {
+    return (
+      <div className="space-y-6 animate-in fade-in duration-500 pb-20">
+        <div className="bg-white p-10 rounded-[40px] border border-gray-100 shadow-sm">
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Access Restricted</h1>
+          <p className="text-gray-500 mt-2 font-medium">
+            Identity Governance is disabled for your identity. Ask an administrator to enable it.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500 pb-20">
@@ -294,9 +379,18 @@ const UserManagement: React.FC = () => {
                           </div>
                         </td>
                         <td className="px-10 py-6 text-right">
-                          <button className="p-3 text-gray-300 hover:text-blue-600 hover:bg-white rounded-xl transition-all hover:shadow-md">
-                            <MoreHorizontal size={20} />
-                          </button>
+                          <div className="flex justify-end gap-2">
+                            <button
+                              onClick={() => openFeatureEditor(profile)}
+                              className="p-3 text-gray-300 hover:text-blue-600 hover:bg-white rounded-xl transition-all hover:shadow-md"
+                              title="Edit Features"
+                            >
+                              <SlidersHorizontal size={20} />
+                            </button>
+                            <button className="p-3 text-gray-300 hover:text-blue-600 hover:bg-white rounded-xl transition-all hover:shadow-md">
+                              <MoreHorizontal size={20} />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -315,6 +409,86 @@ const UserManagement: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {isFeatureModalOpen && selectedProfile && featureEdits && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-6">
+          <div className="w-full max-w-3xl bg-white rounded-[40px] border border-gray-100 shadow-2xl overflow-hidden">
+            <div className="p-8 border-b border-gray-50 bg-gray-50/30 flex items-start justify-between gap-6">
+              <div>
+                <h3 className="text-xl font-black text-gray-900 tracking-tight">Feature Control</h3>
+                <p className="text-xs text-gray-500 font-bold mt-1">
+                  {selectedProfile.full_name} · {selectedProfile.email}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setIsFeatureModalOpen(false);
+                  setSelectedProfile(null);
+                  setFeatureEdits(null);
+                }}
+                className="px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-white border border-gray-100 text-gray-500 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="p-8 max-h-[70vh] overflow-y-auto">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {FEATURE_DEFINITIONS.map(def => {
+                  const enabled = !!featureEdits[def.key];
+                  return (
+                    <button
+                      key={def.key}
+                      type="button"
+                      onClick={() => setFeatureEdits(prev => (prev ? { ...prev, [def.key]: !enabled } : prev))}
+                      className={`text-left p-5 rounded-3xl border transition-all ${
+                        enabled
+                          ? 'bg-blue-50 border-blue-100 hover:bg-blue-100/60'
+                          : 'bg-white border-gray-100 hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0">
+                          <div className="text-xs font-black text-gray-900 tracking-tight">{def.label}</div>
+                          <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest mt-1">
+                            {def.category}
+                          </div>
+                          <p className="text-[11px] text-gray-500 font-bold mt-2 leading-relaxed">{def.description}</p>
+                        </div>
+                        <div
+                          className={`shrink-0 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest ${
+                            enabled ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600'
+                          }`}
+                        >
+                          {enabled ? 'On' : 'Off'}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="p-8 border-t border-gray-50 bg-gray-50/30 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setFeatureEdits(resolveFeatureFlags(selectedProfile.role, null))}
+                className="px-6 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-white border border-gray-100 text-gray-600 hover:bg-gray-50"
+                disabled={isSavingFeatures}
+              >
+                Reset Defaults
+              </button>
+              <button
+                onClick={saveFeatureEdits}
+                disabled={isSavingFeatures}
+                className="px-8 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest bg-gray-900 text-white hover:bg-black transition-all disabled:opacity-50 flex items-center gap-2"
+              >
+                {isSavingFeatures ? <Loader2 className="animate-spin" size={16} /> : null}
+                Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

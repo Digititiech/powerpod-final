@@ -36,14 +36,17 @@ import {
 } from 'recharts';
 import { supabase } from '../lib/supabase';
 import Transactions from './Transactions';
+import { useAccessControl } from '../lib/AccessControlContext';
+import { View } from '../types';
 
 type PaymentFilterType = 'ALL' | 'PENDING' | 'SETTLED';
 
 interface DashboardProps {
-  onNavigate: (view: string) => void;
+  onNavigate: (view: View) => void;
 }
 
 const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
+  const { hasFeature } = useAccessControl();
   const [currentTab, setCurrentTab] = useState<'overview' | 'transactions'>('overview');
   const [loading, setLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
@@ -102,6 +105,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     return new Date(year, month).getTime();
   };
 
+  useEffect(() => {
+    if (!hasFeature('dashboard.transactions.view') && currentTab === 'transactions') {
+      setCurrentTab('overview');
+    }
+  }, [currentTab, hasFeature]);
+
   // Click outside for month picker
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -156,58 +165,28 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   const fetchDashboardData = async () => {
     setLoading(true);
     try {
-      // 1. Fetch Merchants for Contract Logic
+      // 1. Fetch Merchants for Contract Logic & Master Counts
       const { data: merchantsData } = await supabase
         .from('merchants')
-        .select('id, revenue_share_percentage, contract_type');
+        .select('id, revenue_share_percentage, contract_type, merchant_name, company_name');
       
       const merchantContractMap = new Map(merchantsData?.map((m: any) => [m.id, m]) || []);
-
-      // 2. Build Query for Summaries
-      let summaryQuery = supabase
-        .from('merchant_period_summaries')
-        .select(`
-          id,
-          merchant_id,
-          is_paid,
-          merchant_payable,
-          total_sales,
-          net_profit,
-          monthly_reports!inner (report_month),
-          merchants!inner (merchant_name, company_name)
-        `);
-
-      if (paymentFilter === 'PENDING') summaryQuery = summaryQuery.eq('is_paid', false);
-      if (paymentFilter === 'SETTLED') summaryQuery = summaryQuery.eq('is_paid', true);
       
-      if (selectedMonths.length > 0) {
-        summaryQuery = summaryQuery.in('monthly_reports.report_month', selectedMonths);
-      }
-
-      const { data: summaries } = await summaryQuery;
-      
-      // 3. Fetch Master Counts
       const { count: mCount } = await supabase.from('merchants').select('*', { count: 'exact', head: true });
       const { count: sCount } = await supabase.from('stations').select('*', { count: 'exact', head: true });
 
-      // 4. Calculate Total Sales from Transactions (Source of Truth)
-      // This ensures Dashboard Total Sales matches Transactions Tab exactly
-      
-      // We need to match the exact same logic as Transactions.tsx which calculates Grand Total
-      // Transactions.tsx fetches everything and sums it up on the client side (chunked).
-      
-      let realTotalSales = 0;
-      
-      // If we are filtering by period/status, we can use a query
-      // But if no filters are active, we should use a simpler count or aggregate if possible
-      // However, to be 100% accurate with the Transactions tab which might have specific inclusion rules
-      // we will replicate the fetch.
-      
-      // Optimization: Use Supabase aggregate if possible, but RLS might prevent it or require exact same query
-      // Let's fetch ONLY the amount column to minimize bandwidth
+      // 2. Calculate Total Sales & Payout from Transactions (Source of Truth)
       
       const CHUNK_SIZE = 1000;
       let allAmounts: number[] = [];
+      const chartMap = new Map<string, { sales: number; payout: number }>();
+      const processedFixedMerchants = new Set<string>(); // To track fixed charge application per month
+      
+      let totalRevenue = 0;
+      let totalPayout = 0;
+      let totalPending = 0;
+      let rankingMap = new Map();
+
       let hasMore = true;
       let offset = 0;
       
@@ -216,8 +195,13 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           let txQuery = supabase.from('sales_transactions')
             .select(`
               amount,
+              stripe_fee,
+              tax_fee,
+              transaction_date,
+              venue_name,
               merchant_period_summaries!inner (
                  is_paid,
+                 merchant_id,
                  monthly_reports!inner (report_month)
               )
             `);
@@ -228,6 +212,13 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           if (selectedMonths.length > 0) {
             txQuery = txQuery.in('merchant_period_summaries.monthly_reports.report_month', selectedMonths);
           }
+
+          if (dateRange.start) {
+            txQuery = txQuery.gte('transaction_date', `${dateRange.start} 00:00:00`);
+          }
+          if (dateRange.end) {
+            txQuery = txQuery.lte('transaction_date', `${dateRange.end} 23:59:59`);
+          }
           
           const { data: chunk, error } = await txQuery.range(offset, offset + CHUNK_SIZE - 1);
           
@@ -237,8 +228,69 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           }
           
           if (chunk && chunk.length > 0) {
-              const amounts = chunk.map((t: any) => Number(t.amount) || 0);
-              allAmounts = allAmounts.concat(amounts);
+              chunk.forEach((tx: any) => {
+                  const amount = Number(tx.amount) || 0;
+                  const stripe = Number(tx.stripe_fee) || 0;
+                  const tax = Number(tx.tax_fee) || 0;
+                  
+                  // Net Sales available for split
+                  const netSales = amount - stripe - tax;
+
+                  // Chart Data (Group by Month)
+                  const reportMonth = tx.merchant_period_summaries?.monthly_reports?.report_month;
+                  let chartKey = reportMonth;
+
+                  if (!chartKey) {
+                    const dateObj = new Date(tx.transaction_date);
+                    chartKey = dateObj.toLocaleString('en-US', { month: 'short', year: 'numeric' }); 
+                  }
+                  
+                  // Calculate Payout based on Contract
+                  const mId = tx.merchant_period_summaries?.merchant_id;
+                  const merchant = merchantContractMap.get(mId);
+                  
+                  let txPayout = 0;
+                  
+                  if (merchant) {
+                    if (merchant.contract_type === 'Fixed Charge - Monthly') {
+                        // Fixed Charge Logic: Add fixed amount ONCE per month per merchant
+                        const fixedKey = `${mId}_${chartKey}`;
+                        if (!processedFixedMerchants.has(fixedKey)) {
+                            const fixedAmount = Number(merchant.revenue_share_percentage) || 0;
+                            txPayout = fixedAmount; 
+                            processedFixedMerchants.add(fixedKey);
+                        }
+                    } else {
+                        // Revenue Share Logic: (Net Sales * Share %)
+                        const share = Number(merchant.revenue_share_percentage) || 0;
+                        txPayout = netSales * (share / 100);
+                    }
+                  }
+
+                  // Update Totals
+                  totalRevenue += amount;
+                  totalPayout += txPayout;
+                  
+                  if (tx.merchant_period_summaries?.is_paid === false) {
+                      totalPending += txPayout;
+                  }
+
+                  // Update Chart
+                  const currentChartVal = chartMap.get(chartKey) || { sales: 0, payout: 0 };
+                  currentChartVal.sales += amount;
+                  currentChartVal.payout += txPayout;
+                  chartMap.set(chartKey, currentChartVal);
+
+                  // Update Ranking
+                  const existing = rankingMap.get(mId) || { 
+                      name: merchant?.merchant_name || 'Unknown',
+                      company: merchant?.company_name || 'Unknown',
+                      sales: 0
+                  };
+                  existing.sales += amount;
+                  rankingMap.set(mId, existing);
+              });
+
               offset += CHUNK_SIZE;
               
               if (chunk.length < CHUNK_SIZE) hasMore = false;
@@ -246,41 +298,6 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
               hasMore = false;
           }
       }
-      
-      realTotalSales = allAmounts.reduce((sum, val) => sum + val, 0);
-
-      let totalRevenue = 0; // Will be replaced by realTotalSales
-      let totalPayout = 0;
-      let totalPending = 0;
-      let rankingMap = new Map();
-
-      if (summaries && summaries.length > 0) {
-          summaries.forEach((s: any) => {
-              const sales = n(s.total_sales);
-              const payable = n(s.merchant_payable);
-              // const net = n(s.net_profit); // No longer used for income calc
-              
-              totalRevenue += sales; // Kept for reference but overwritten below
-              totalPayout += payable;
-
-              if (!s.is_paid) {
-                  totalPending += payable;
-              }
-
-              // Update Ranking
-              const mId = s.merchant_id;
-              const existing = rankingMap.get(mId) || { 
-                name: s.merchants.merchant_name, 
-                company: s.merchants.company_name, 
-                sales: 0 
-              };
-              existing.sales += sales;
-              rankingMap.set(mId, existing);
-          });
-      }
-      
-      // Override Revenue with Transaction-based Sum
-      totalRevenue = realTotalSales;
 
       // Platform Net Income = Total Sales - Total Merchant Payout
       const platformNetIncome = totalRevenue - totalPayout;
@@ -295,26 +312,19 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         netIncome: platformNetIncome
       });
 
-      // 4. Chart Data (Sanitized periods)
-      const { data: reports } = await supabase
-        .from('monthly_reports')
-        .select('report_month, total_sales')
-        .order('report_month', { ascending: true });
-
-      const filteredReports = reports?.filter((r: any) => {
-        if (!r.report_month) return false;
-        return true; // Show all periods
-      }) || [];
+      // 4. Chart Data (From Aggregated Transactions)
+      const chartArray = Array.from(chartMap.entries()).map(([month, data]) => ({
+        name: month,
+        sales: data.sales,
+        payout: data.payout
+      }));
 
       // Sort reports chronologically
-      const sortedReports = filteredReports.sort((a: any, b: any) => {
-        return parseMonthYear(a.report_month) - parseMonthYear(b.report_month);
+      const sortedChartData = chartArray.sort((a, b) => {
+        return parseMonthYear(a.name) - parseMonthYear(b.name);
       });
 
-      setChartData(sortedReports.map((r: any) => ({
-        name: r.report_month,
-        sales: r.total_sales
-      })));
+      setChartData(sortedChartData);
 
       // 5. Top Merchants (Ranking)
       const sorted = Array.from(rankingMap.values())
@@ -445,12 +455,14 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
             >
               Overview
             </button>
-            <button 
-              onClick={() => setCurrentTab('transactions')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${currentTab === 'transactions' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
-            >
-              Transactions
-            </button>
+            {hasFeature('dashboard.transactions.view') && (
+              <button 
+                onClick={() => setCurrentTab('transactions')}
+                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${currentTab === 'transactions' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
+              >
+                Transactions
+              </button>
+            )}
           </div>
         </div>
         
@@ -492,6 +504,20 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
             </button>
             {showMonthPicker && (
               <div className="absolute top-full right-0 mt-3 bg-white rounded-[24px] shadow-2xl border border-gray-100 z-[100] overflow-hidden min-w-[200px] animate-in fade-in zoom-in-95 duration-200">
+                <div className="p-2 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+                  <button 
+                    onClick={() => setSelectedMonths(availableMonths)}
+                    className="text-[9px] font-black uppercase tracking-widest text-blue-600 hover:text-blue-700 px-2 py-1 rounded hover:bg-blue-50 transition-colors"
+                  >
+                    Select All
+                  </button>
+                  <button 
+                    onClick={() => setSelectedMonths([])}
+                    className="text-[9px] font-black uppercase tracking-widest text-gray-400 hover:text-red-500 px-2 py-1 rounded hover:bg-red-50 transition-colors"
+                  >
+                    Clear
+                  </button>
+                </div>
                 <div className="max-h-60 overflow-y-auto p-2">
                   {availableMonths.map(m => (
                     <button key={m} onClick={() => setSelectedMonths(prev => prev.includes(m) ? prev.filter(x => x !== m) : [...prev, m])} className={`w-full flex items-center justify-between p-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all mb-1 ${selectedMonths.includes(m) ? 'bg-blue-50 text-blue-700' : 'hover:bg-gray-50 text-gray-600'}`}>
@@ -612,11 +638,15 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
               {chartData.length > 0 ? (
                 <div className="flex-1 w-full h-[400px]">
                   <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={chartData}>
+                    <BarChart data={chartData} barGap={8}>
                       <defs>
                         <linearGradient id="salesGradient" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="0%" stopColor="#2563eb" stopOpacity={0.8}/>
                           <stop offset="95%" stopColor="#2563eb" stopOpacity={0.1}/>
+                        </linearGradient>
+                        <linearGradient id="payoutGradient" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#16a34a" stopOpacity={0.8}/>
+                          <stop offset="95%" stopColor="#16a34a" stopOpacity={0.1}/>
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
@@ -636,13 +666,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
                       <Tooltip 
                         cursor={{fill: '#f9fafb'}} 
                         contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 25px 50px -12px rgb(0 0 0 / 0.1)', padding: '16px'}}
-                        formatter={(value: number) => [`AED ${value.toLocaleString()}`, 'Total Sales']}
+                        formatter={(value: number, name: string) => [`AED ${value.toLocaleString()}`, name]}
                       />
-                      <Bar dataKey="sales" radius={[8, 8, 0, 0]} barSize={40} fill="url(#salesGradient)">
-                        {chartData.map((_, index) => (
-                          <Cell key={`cell-${index}`} fillOpacity={1} />
-                        ))}
-                      </Bar>
+                      <Bar name="Total Sales" dataKey="sales" radius={[4, 4, 0, 0]} barSize={20} fill="url(#salesGradient)" />
+                      <Bar name="Merchant Payout" dataKey="payout" radius={[4, 4, 0, 0]} barSize={20} fill="url(#payoutGradient)" />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -685,7 +712,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
               
               <button 
                 onClick={downloadGlobalAudit}
-                disabled={isExporting || topMerchants.length === 0}
+                disabled={!hasFeature('dashboard.audit.download') || isExporting || topMerchants.length === 0}
                 className="w-full mt-12 py-5 text-[10px] font-black uppercase tracking-[2px] text-blue-600 bg-blue-50 rounded-2xl hover:bg-blue-100 transition-all active:scale-95 flex items-center justify-center space-x-2 disabled:opacity-50"
               >
                 {isExporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}

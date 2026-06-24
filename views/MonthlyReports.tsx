@@ -43,6 +43,7 @@ import {
   Zap
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { useAccessControl } from '../lib/AccessControlContext';
 import { GoogleGenAI } from "@google/genai";
 import { Merchant } from '../types';
 
@@ -58,11 +59,16 @@ interface DispatchDraft {
   bcc: string;
   subject: string;
   phone: string;
+  notes: Record<string, string>;
+  additionalAttachments?: File[];
+  selectedPeriods: { id: string; name: string }[];
 }
 
 const MonthlyReports: React.FC = () => {
+  const { hasFeature } = useAccessControl();
   const [reports, setReports] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [paymentFilter, setPaymentFilter] = useState<PaymentFilterType>('ALL');
   const [availableMonths, setAvailableMonths] = useState<string[]>([]);
@@ -90,9 +96,15 @@ const MonthlyReports: React.FC = () => {
   const [detailSearch, setDetailSearch] = useState('');
 
   const [activeDispatch, setActiveDispatch] = useState<DispatchDraft | null>(null);
+  const [ccHistory, setCcHistory] = useState<string[]>([]);
+  const [savedCcExtra, setSavedCcExtra] = useState('');
+  const [bccHistory, setBccHistory] = useState<string[]>([]);
+  const [savedBccExtra, setSavedBccExtra] = useState('');
   const [merchantSelections, setMerchantSelections] = useState<Record<string, string[]>>({});
   const [remittanceNotes, setRemittanceNotes] = useState<Record<string, string>>({});
+  const [internalNotes, setInternalNotes] = useState<Record<string, string>>({});
   const [savingNotes, setSavingNotes] = useState<Record<string, boolean>>({});
+  const [savingInternalNotes, setSavingInternalNotes] = useState<Record<string, boolean>>({});
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
   const [venueStats, setVenueStats] = useState<Record<string, {name: string, sales: number, stationCount: number, stations: string[]}[]>>({});
@@ -102,6 +114,145 @@ const MonthlyReports: React.FC = () => {
 
   const f = (val: any) => (Number(val) || 0).toFixed(2);
   const n = (val: any) => Number(val) || 0;
+
+  const CC_HISTORY_KEY = 'reports_cc_history_v1';
+  const CC_EXTRA_KEY = 'reports_cc_extra_v1';
+  const BCC_HISTORY_KEY = 'reports_bcc_history_v1';
+  const BCC_EXTRA_KEY = 'reports_bcc_extra_v1';
+  const COMMON_REMITTANCE_NOTE_KEY = '__common_remittance_note__';
+
+  const downloadFinancialHubExcel = async () => {
+    // @ts-ignore
+    const XLSX = window.XLSX;
+    if (!XLSX) {
+      alert('Excel export engine not available. Please reload the page.');
+      return;
+    }
+
+    setIsExportingExcel(true);
+    try {
+      const rows = reports.map((r: any) => {
+        const merchant = r.merchants || {};
+        const reportMonth = r.monthly_reports?.report_month || '';
+
+        return {
+          'Report Month': reportMonth,
+          'Summary ID': r.id ?? '',
+          'Report ID': r.report_id ?? '',
+          'Merchant ID': r.merchant_id ?? merchant.id ?? '',
+          'Merchant Name': merchant.merchant_name ?? r.merchant_name ?? '',
+          'Company Name': merchant.company_name ?? '',
+          'Status': r.is_paid ? 'Settled' : 'Unpaid',
+          'Total Sales': n(r.total_sales),
+          'Stripe Fees': n(r.stripe_fees),
+          'Tax Amount': n(r.tax_amount),
+          'Net Profit': n(r.net_profit),
+          'Merchant Payable': n(r.merchant_payable),
+          'PDF Report URL': r.pdf_report_url ?? '',
+          'Remittance Note': r.remittance_note ?? '',
+          'Internal Note': r.internal_note ?? '',
+          'Reporting Preference': merchant.reporting_preference ?? '',
+          'Reporting Email': merchant.reporting_email ?? merchant.email ?? '',
+          'Reporting WhatsApp': merchant.reporting_whatsapp ?? '',
+          'Contact Name': merchant.contact_name ?? '',
+          'Phone': merchant.phone ?? '',
+          'Contract Type': merchant.contract_type ?? '',
+          'Revenue Share %': merchant.revenue_share_percentage ?? '',
+          'Payment Duration': merchant.payment_duration ?? '',
+          'Merchant Notes': merchant.notes ?? '',
+          'Bank Name': merchant.bank_name ?? '',
+          'Bank Account Number': merchant.bank_account_number ?? '',
+          'IBAN': merchant.iban ?? '',
+          'TRN': merchant.trn ?? '',
+          'Created At': r.created_at ?? '',
+        };
+      });
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Financial Hub');
+
+      const yyyyMmDd = new Date().toISOString().slice(0, 10);
+      XLSX.writeFile(wb, `financial_hub_export_${yyyyMmDd}.xlsx`);
+    } catch (e: any) {
+      console.error('Excel export failed', e);
+      alert(e?.message || 'Excel export failed.');
+    } finally {
+      setIsExportingExcel(false);
+    }
+  };
+
+  const normalizeEmails = (value: string) => {
+    const parts = String(value || '')
+      .split(/[,;\n]+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    const isEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+
+    const out: string[] = [];
+    const seen = new Set<string>();
+
+    for (const p of parts) {
+      if (!isEmail(p)) continue;
+      const k = p.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(p);
+    }
+
+    return out;
+  };
+
+  const buildCc = (systemEmail: string, extraCc: string) => {
+    const merged = [...normalizeEmails(systemEmail), ...normalizeEmails(extraCc)];
+    return merged.join(', ');
+  };
+
+  const extractExtraCc = (ccValue: string, systemEmail: string) => {
+    const sys = new Set(normalizeEmails(systemEmail).map(e => e.toLowerCase()));
+    const extras = normalizeEmails(ccValue).filter(e => !sys.has(e.toLowerCase()));
+    return extras.join(', ');
+  };
+
+  const extractExtraBcc = (bccValue: string) => {
+    return normalizeEmails(bccValue).join(', ');
+  };
+
+  useEffect(() => {
+    try {
+      const rawHistory = localStorage.getItem(CC_HISTORY_KEY);
+      if (rawHistory) {
+        const parsed = JSON.parse(rawHistory);
+        if (Array.isArray(parsed)) {
+          setCcHistory(parsed.filter(v => typeof v === 'string'));
+        }
+      }
+
+      const extra = localStorage.getItem(CC_EXTRA_KEY);
+      if (extra && typeof extra === 'string') {
+        setSavedCcExtra(extra);
+      }
+
+      const rawBccHistory = localStorage.getItem(BCC_HISTORY_KEY);
+      if (rawBccHistory) {
+        const parsed = JSON.parse(rawBccHistory);
+        if (Array.isArray(parsed)) {
+          setBccHistory(parsed.filter(v => typeof v === 'string'));
+        }
+      }
+
+      const extraBcc = localStorage.getItem(BCC_EXTRA_KEY);
+      if (extraBcc && typeof extraBcc === 'string') {
+        setSavedBccExtra(extraBcc);
+      }
+    } catch {
+      setCcHistory([]);
+      setSavedCcExtra('');
+      setBccHistory([]);
+      setSavedBccExtra('');
+    }
+  }, []);
 
   // Click outside handler for month picker
   useEffect(() => {
@@ -174,15 +325,18 @@ const MonthlyReports: React.FC = () => {
                     // Restore auxiliary state
                     const initialSelections: Record<string, string[]> = {};
                     const initialNotes: Record<string, string> = {};
+                    const initialInternalNotes: Record<string, string> = {};
                     parsed.forEach((r: any) => {
                         const mId = r.merchants.id;
                         const month = r.monthly_reports.report_month;
                         if (!initialSelections[mId]) initialSelections[mId] = [];
                         initialSelections[mId].push(month);
                         if (r.remittance_note) initialNotes[r.id] = r.remittance_note;
+                        if (r.internal_note) initialInternalNotes[r.id] = r.internal_note;
                     });
                     setMerchantSelections(initialSelections);
                     setRemittanceNotes(initialNotes);
+                    setInternalNotes(initialInternalNotes);
                     
                     fetchVenueDetailsSilent(parsed);
                     setLoading(false);
@@ -206,7 +360,7 @@ const MonthlyReports: React.FC = () => {
           .select(`
             *,
             monthly_reports!inner (report_month),
-            merchants!inner (id, merchant_name, contract_type, revenue_share_percentage, company_name, email, phone, contact_name, bank_name, bank_account_number, iban, trn, reporting_preference, notes, payment_duration)
+            merchants!inner (id, merchant_name, contract_type, revenue_share_percentage, company_name, email, reporting_email, phone, reporting_whatsapp, contact_name, bank_name, bank_account_number, iban, trn, reporting_preference, notes, payment_duration)
           `)
           .in('monthly_reports.report_month', selectedGlobalMonths)
           .range(from, from + pageSize - 1);
@@ -236,6 +390,7 @@ const MonthlyReports: React.FC = () => {
       
       const initialSelections: Record<string, string[]> = {};
       const initialNotes: Record<string, string> = {};
+      const initialInternalNotes: Record<string, string> = {};
       
       allData.forEach(r => {
         const mId = r.merchants.id;
@@ -246,9 +401,13 @@ const MonthlyReports: React.FC = () => {
         if (r.remittance_note) {
             initialNotes[r.id] = r.remittance_note;
         }
+        if (r.internal_note) {
+            initialInternalNotes[r.id] = r.internal_note;
+        }
       });
       setMerchantSelections(initialSelections);
       setRemittanceNotes(initialNotes);
+      setInternalNotes(initialInternalNotes);
 
       // Trigger silent background fetch for details
       fetchVenueDetailsSilent(allData);
@@ -363,7 +522,44 @@ const MonthlyReports: React.FC = () => {
     });
   };
 
+  const saveInternalNote = async (reportId: string, note: string) => {
+    setSavingInternalNotes(prev => ({ ...prev, [reportId]: true }));
+    try {
+        const { error } = await supabase
+            .from('merchant_period_summaries')
+            .update({ internal_note: note })
+            .eq('id', reportId);
+        
+        if (error) throw error;
+
+        // Update local state reports to reflect the change
+        setReports(prev => prev.map(r => r.id === reportId ? { ...r, internal_note: note } : r));
+        
+        // Update cache
+        const cacheKey = `reports_cache_v2_${selectedGlobalMonths.slice().sort().join('_')}`;
+        try {
+            const cached = localStorage.getItem(cacheKey);
+            if (cached) {
+                const parsed = JSON.parse(cached);
+                const updated = parsed.map((r: any) => r.id === reportId ? { ...r, internal_note: note } : r);
+                localStorage.setItem(cacheKey, JSON.stringify(updated));
+            }
+        } catch (e) {
+            console.warn("Failed to update cache for internal note", e);
+        }
+
+    } catch (e) {
+        console.error("Failed to save internal note", e);
+    } finally {
+        setSavingInternalNotes(prev => ({ ...prev, [reportId]: false }));
+    }
+  };
+
   const togglePaymentStatus = async (summaryId: string, currentStatus: boolean) => {
+    if (!hasFeature('reports.payment.toggle')) {
+      alert('Access denied: Toggle Payment Status is disabled for your identity.');
+      return;
+    }
     setUpdatingPaymentId(summaryId);
     try {
       const { error } = await supabase
@@ -398,6 +594,10 @@ const MonthlyReports: React.FC = () => {
   };
 
   const handleEditClick = (merchant: Merchant) => {
+    if (!hasFeature('merchants.edit')) {
+      alert('Access denied: Edit Merchants feature is disabled for your identity.');
+      return;
+    }
     setEditingMerchant({ ...merchant });
     setIsEditModalOpen(true);
   };
@@ -408,12 +608,17 @@ const MonthlyReports: React.FC = () => {
 
     setIsSaving(true);
     try {
+      if (!hasFeature('merchants.edit')) {
+        throw new Error('Access denied: Edit Merchants feature is disabled for your identity.');
+      }
       const { error: updateError } = await supabase
         .from('merchants')
         .update({
           email: editingMerchant.email,
+          reporting_email: editingMerchant.reporting_email,
           contact_name: editingMerchant.contact_name,
           phone: editingMerchant.phone,
+          reporting_whatsapp: editingMerchant.reporting_whatsapp,
           bank_name: editingMerchant.bank_name,
           bank_account_number: editingMerchant.bank_account_number,
           iban: editingMerchant.iban,
@@ -687,7 +892,7 @@ const MonthlyReports: React.FC = () => {
       setExpandedGroups(prev => ({ ...prev, [letter]: !prev[letter] }));
   };
 
-  const generatePDFObject = async (mId: string, selected: string[]) => {
+  const generatePDFObject = async (mId: string, selected: string[], remittanceNoteOverride?: string) => {
     const mInfo = filteredMerchantsList.find(m => m.id === mId);
     if (!mInfo) return null;
 
@@ -800,9 +1005,14 @@ const MonthlyReports: React.FC = () => {
     doc.setFont('helvetica', 'normal');
     doc.text(`Dear ${mInfo.merchant.contact_name || mInfo.name.toUpperCase()} | ${mInfo.merchant.company_name?.toUpperCase() || mInfo.name.toUpperCase()}`, 15, currentY);
     currentY += 7;
+    
     const sortedSelected = [...selected].sort(sortMonths);
-    doc.text(`Monthly Sales Report for ${mInfo.name.toUpperCase()} - Period(s): ${sortedSelected.join(', ')}`, 15, currentY);
-    currentY += 15;
+    const periodText = `Monthly Sales Report for ${mInfo.name.toUpperCase()} - Period(s): ${sortedSelected.join(', ')}`;
+    const splitPeriod = doc.splitTextToSize(periodText, pageWidth - 30);
+    doc.text(splitPeriod, 15, currentY);
+    
+    // Adjust currentY based on number of lines
+    currentY += (splitPeriod.length * 5) + 5;
 
     // Period Sales Details
     doc.setFontSize(12);
@@ -941,27 +1151,30 @@ const MonthlyReports: React.FC = () => {
 
     doc.setFontSize(10);
     doc.setFont('helvetica', 'normal');
-    
-    let combinedNotes = '';
-    
-    // Check if we have any custom notes
-    const notesList = relevantReports
-        .filter(r => remittanceNotes[r.id] && remittanceNotes[r.id].trim() !== '')
-        .map(r => ({ period: r.monthly_reports.report_month, note: remittanceNotes[r.id] }));
 
-    if (notesList.length > 0) {
-        if (notesList.length === 1 && relevantReports.length === 1) {
-             // Single report, single note - just show the note
-            combinedNotes = notesList[0].note;
-        } else {
-            // Multiple reports/notes - show list
-            combinedNotes = notesList.map(n => `${n.period}: ${n.note}`).join('\n\n');
-        }
+    let combinedNotes = '';
+    const override = String(remittanceNoteOverride || '').trim();
+
+    if (override) {
+        combinedNotes = override;
     } else {
-        combinedNotes = 'Your remittance notes here. This report serves as an official statement of generated income.';
+        const notesList = relevantReports
+            .filter(r => remittanceNotes[r.id] && remittanceNotes[r.id].trim() !== '')
+            .map(r => ({ period: r.monthly_reports.report_month, note: remittanceNotes[r.id] }));
+
+        if (notesList.length > 0) {
+            if (notesList.length === 1 && relevantReports.length === 1) {
+                combinedNotes = notesList[0].note;
+            } else {
+                combinedNotes = notesList.map(n => `${n.period}: ${n.note}`).join('\n\n');
+            }
+        } else {
+            combinedNotes = 'Your remittance notes here. This report serves as an official statement of generated income.';
+        }
     }
 
     const splitNotes = doc.splitTextToSize(combinedNotes, pageWidth - 30);
+    doc.setTextColor(colorRed[0], colorRed[1], colorRed[2]);
     doc.text(splitNotes, 15, currentY);
 
     // --- Detailed Breakdown (Per Month) ---
@@ -993,7 +1206,10 @@ const MonthlyReports: React.FC = () => {
             const sName = tx.station_name || 'Unknown Station';
             if (!venueMap.has(vName)) venueMap.set(vName, new Map());
             const sMap = venueMap.get(vName)!;
-            sMap.set(sName, (sMap.get(sName) || 0) + n(tx.amount));
+            
+            // Calculate Net Sales for Payout per transaction
+            const net = n(tx.amount) - n(tx.stripe_fee) - n(tx.tax_fee);
+            sMap.set(sName, (sMap.get(sName) || 0) + net);
         });
 
         const venueRows: any[] = [];
@@ -1006,7 +1222,7 @@ const MonthlyReports: React.FC = () => {
         // @ts-ignore
         doc.autoTable({
             startY: currentY,
-            head: [['Venue', 'Station', 'Total Sales']],
+            head: [['Venue', 'Station', 'Net Sales for Payout']],
             body: venueRows,
             theme: 'grid',
             headStyles: { fillColor: [220, 220, 220], textColor: 0, fontStyle: 'bold' },
@@ -1077,16 +1293,32 @@ const MonthlyReports: React.FC = () => {
     const mInfo = filteredMerchantsList.find(m => m.id === mId);
     if (!mInfo) return;
     const selected = merchantSelections[mId] || [];
-    
+
+    const relevantPeriods = mInfo.periods.filter(p => selected.includes(p.monthly_reports.report_month));
+
+    const selectedPeriodsData: { id: string; name: string }[] = [];
+    relevantPeriods.forEach(p => {
+        selectedPeriodsData.push({ id: p.id, name: p.monthly_reports.report_month });
+    });
+
+    const existingNotes = relevantPeriods
+      .map(p => (remittanceNotes[p.id] || '').trim())
+      .filter(Boolean);
+    const uniqueExisting = Array.from(new Set(existingNotes));
+    const initialCommonNote = uniqueExisting.length === 1 ? uniqueExisting[0] : '';
+
     setActiveDispatch({
       type: 'email',
       merchantId: mId,
       merchantName: mInfo.name,
-      to: mInfo.merchant.email || '',
-      cc: 'finance@powerpod.ae',
-      bcc: '',
+      to: mInfo.merchant.reporting_email || mInfo.merchant.email || '',
+      cc: buildCc(mInfo.merchant.email || '', savedCcExtra),
+      bcc: savedBccExtra,
       subject: 'Powerpod Sales Report',
-      phone: mInfo.merchant.phone || ''
+      phone: mInfo.merchant.reporting_whatsapp || mInfo.merchant.phone || '',
+      notes: { [COMMON_REMITTANCE_NOTE_KEY]: initialCommonNote },
+      additionalAttachments: [],
+      selectedPeriods: selectedPeriodsData
     });
   };
 
@@ -1094,15 +1326,28 @@ const MonthlyReports: React.FC = () => {
     const mInfo = filteredMerchantsList.find(m => m.id === mId);
     if (!mInfo) return;
     
+    const selected = merchantSelections[mId] || [];
+    const relevantPeriods = mInfo.periods.filter(p => selected.includes(p.monthly_reports.report_month));
+    
+    const initialNotes: Record<string, string> = {};
+    const selectedPeriodsData: { id: string; name: string }[] = [];
+
+    relevantPeriods.forEach(p => {
+        initialNotes[p.id] = remittanceNotes[p.id] || '';
+        selectedPeriodsData.push({ id: p.id, name: p.monthly_reports.report_month });
+    });
+
     setActiveDispatch({
       type: 'whatsapp',
       merchantId: mId,
       merchantName: mInfo.name,
-      to: mInfo.merchant.email || '',
+      to: mInfo.merchant.reporting_email || mInfo.merchant.email || '',
       cc: '',
       bcc: '',
       subject: '',
-      phone: mInfo.merchant.phone || ''
+      phone: mInfo.merchant.reporting_whatsapp || mInfo.merchant.phone || '',
+      notes: initialNotes,
+      selectedPeriods: selectedPeriodsData
     });
   };
 
@@ -1144,6 +1389,17 @@ const MonthlyReports: React.FC = () => {
   const executeEmailDispatch = async () => {
     if (!activeDispatch) return;
     const draft = { ...activeDispatch };
+
+    if (!hasFeature('reports.send.email')) {
+      setDispatchStatus({
+        msg: 'Access denied: Email Dispatch is disabled for your identity.',
+        logs: ['Permission check failed.'],
+        type: 'error'
+      });
+      setTimeout(() => setDispatchStatus(null), 5000);
+      return;
+    }
+
     setActiveDispatch(null);
     
     setDispatchStatus({ 
@@ -1160,13 +1416,96 @@ const MonthlyReports: React.FC = () => {
     try {
       const selected = merchantSelections[draft.merchantId] || [];
       const mInfo = filteredMerchantsList.find(m => m.id === draft.merchantId)!;
+      const relevantReports = mInfo.periods.filter(p => selected.includes(p.monthly_reports.report_month));
+
+      const commonRemittanceNote = String(draft.notes[COMMON_REMITTANCE_NOTE_KEY] ?? '');
+      const trimmedCommonRemittanceNote = commonRemittanceNote.trim();
+
+      if (trimmedCommonRemittanceNote) {
+        for (const period of draft.selectedPeriods) {
+          const note = trimmedCommonRemittanceNote;
+          if (note !== (remittanceNotes[period.id] || '')) {
+            await supabase
+              .from('merchant_period_summaries')
+              .update({ remittance_note: note })
+              .eq('id', period.id);
+
+            setRemittanceNotes(prev => ({ ...prev, [period.id]: note }));
+            setReports(prev => prev.map(r => r.id === period.id ? { ...r, remittance_note: note } : r));
+          }
+        }
+      }
+
+      // Process Additional Attachments
+      const processedAttachments: {filename: string, path: string, content_type: string}[] = [];
+      if (draft.additionalAttachments && draft.additionalAttachments.length > 0) {
+          setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, `Processing ${draft.additionalAttachments?.length} additional attachment(s)...`] }));
+          for (const file of draft.additionalAttachments) {
+              const base64 = await new Promise<string>((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.onload = (e) => resolve(e.target?.result as string);
+                  reader.onerror = reject;
+                  reader.readAsDataURL(file);
+              });
+              processedAttachments.push({
+                  filename: file.name,
+                  path: base64,
+                  content_type: file.type
+              });
+          }
+      }
+
+      try {
+        const systemEmail = mInfo.merchant.email || '';
+        const extra = extractExtraCc(draft.cc || '', systemEmail);
+        setSavedCcExtra(extra);
+
+        const extraEmails = normalizeEmails(extra);
+        setCcHistory(prev => {
+          const next = [...prev];
+          const seen = new Set(prev.map(v => v.toLowerCase()));
+          for (const e of extraEmails) {
+            const k = e.toLowerCase();
+            if (seen.has(k)) continue;
+            seen.add(k);
+            next.push(e);
+          }
+          try {
+            localStorage.setItem(CC_HISTORY_KEY, JSON.stringify(next));
+            localStorage.setItem(CC_EXTRA_KEY, extra);
+          } catch {
+          }
+          return next;
+        });
+
+        const extraBcc = extractExtraBcc(draft.bcc || '');
+        setSavedBccExtra(extraBcc);
+        const extraBccEmails = normalizeEmails(extraBcc);
+        setBccHistory(prev => {
+          const next = [...prev];
+          const seen = new Set(prev.map(v => v.toLowerCase()));
+          for (const e of extraBccEmails) {
+            const k = e.toLowerCase();
+            if (seen.has(k)) continue;
+            seen.add(k);
+            next.push(e);
+          }
+          try {
+            localStorage.setItem(BCC_HISTORY_KEY, JSON.stringify(next));
+            localStorage.setItem(BCC_EXTRA_KEY, extraBcc);
+          } catch {
+          }
+          return next;
+        });
+      } catch {
+      }
 
       // Update merchant email if changed
       if (draft.to && draft.to !== mInfo.merchant.email) {
         setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'Updating merchant email record...'] }));
         const { error: updateError } = await supabase
             .from('merchants')
-            .update({ email: draft.to })
+            .update({ reporting_email: draft.to })
             .eq('id', draft.merchantId);
         
         if (!updateError) {
@@ -1174,7 +1513,7 @@ const MonthlyReports: React.FC = () => {
             setReports(prev => {
                 const updatedReports = prev.map(r => {
                     if (r.merchants.id === draft.merchantId) {
-                        return { ...r, merchants: { ...r.merchants, email: draft.to } };
+                        return { ...r, merchants: { ...r.merchants, reporting_email: draft.to } };
                     }
                     return r;
                 });
@@ -1194,20 +1533,19 @@ const MonthlyReports: React.FC = () => {
         }
       }
 
-      const relevantReports = mInfo.periods.filter(p => selected.includes(p.monthly_reports.report_month));
-
       // 1. Generate PDF
       setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'PDF Compiled. Generating HTML Email Content...'] }));
       const pdfDoc = await generatePDFObject(draft.merchantId, selected);
+      if (!pdfDoc) throw new Error('Failed to generate PDF');
       const pdfBase64 = pdfDoc.output('datauristring');
 
       // 2. Generate HTML Email Content
       const totalSales = relevantReports.reduce((acc, r) => acc + n(r.total_sales), 0);
       const totalPayout = relevantReports.reduce((acc, r) => acc + n(r.merchant_payable), 0);
-      
-      const notesList = relevantReports
-        .filter(r => remittanceNotes[r.id] && remittanceNotes[r.id].trim() !== '')
-        .map(r => ({ period: r.monthly_reports.report_month, note: remittanceNotes[r.id] }));
+
+      const notesList = trimmedCommonRemittanceNote
+        ? [{ period: 'Remittance', note: trimmedCommonRemittanceNote }]
+        : [];
 
       const emailHtml = generateEmailHtml({
         merchantName: mInfo.name,
@@ -1231,6 +1569,11 @@ const MonthlyReports: React.FC = () => {
 
       setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'Payload Ready.', 'Transmitting via Supabase Edge Function...'] }));
 
+      const sortedSelected = [...selected].sort(sortMonths);
+      const monthStr = sortedSelected.join('_');
+      const safeMName = (mInfo?.merchant.merchant_name || mInfo?.name || draft.merchantId).replace(/[^a-zA-Z0-9-_ ]/g, '').trim();
+      const pdfFilename = `Powerpod Sales Report - ${safeMName} - ${monthStr}.pdf`;
+
       // 3. Send via Supabase Edge Function
       const { data: result, error } = await supabase.functions.invoke('send-email', {
         body: {
@@ -1242,9 +1585,10 @@ const MonthlyReports: React.FC = () => {
           from: "finance@powerpod.ae",
           attachments: [
             {
-              filename: `Powerpod_Audit_${draft.merchantName.replace(/\s+/g, '_')}.pdf`,
+              filename: pdfFilename,
               path: pdfBase64
-            }
+            },
+            ...processedAttachments
           ]
         }
       });
@@ -1271,6 +1615,17 @@ const MonthlyReports: React.FC = () => {
   const executeWhatsAppDispatch = async () => {
     if (!activeDispatch) return;
     const draft = { ...activeDispatch };
+
+    if (!hasFeature('reports.send.whatsapp')) {
+      setDispatchStatus({
+        msg: 'Access denied: WhatsApp Dispatch is disabled for your identity.',
+        logs: ['Permission check failed.'],
+        type: 'error'
+      });
+      setTimeout(() => setDispatchStatus(null), 5000);
+      return;
+    }
+
     setActiveDispatch(null);
     setDispatchStatus({ 
       msg: `Preparing WhatsApp Summary...`, 
@@ -1284,6 +1639,20 @@ const MonthlyReports: React.FC = () => {
       const relevantReports = mInfo.periods
         .filter(p => selected.includes(p.monthly_reports.report_month))
         .sort((a, b) => new Date(a.monthly_reports.report_month).getTime() - new Date(b.monthly_reports.report_month).getTime());
+
+      // Save Notes if modified
+      for (const period of draft.selectedPeriods) {
+          const note = draft.notes[period.id];
+          if (note !== undefined && note !== (remittanceNotes[period.id] || '')) {
+              await supabase
+                .from('merchant_period_summaries')
+                .update({ remittance_note: note })
+                .eq('id', period.id);
+              
+              setRemittanceNotes(prev => ({ ...prev, [period.id]: note }));
+              setReports(prev => prev.map(r => r.id === period.id ? { ...r, remittance_note: note } : r));
+          }
+      }
 
       // 1. Generate PDF
       setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'PDF Generated. Fetching Station Data...'] }));
@@ -1371,9 +1740,10 @@ const MonthlyReports: React.FC = () => {
       message += `📊 Base Revenue Share: ${share}\n`;
       message += `🤝 Total Merchant Payable: *AED ${f(totalPayable)}*\n`;
 
-      const notesList = relevantReports
-        .filter(r => remittanceNotes[r.id] && remittanceNotes[r.id].trim() !== '')
-        .map(r => ({ period: r.monthly_reports.report_month, note: remittanceNotes[r.id] }));
+      const commonRemittanceNote = String(draft.notes?.[COMMON_REMITTANCE_NOTE_KEY] ?? '').trim();
+      const notesList = commonRemittanceNote
+        ? relevantReports.map(r => ({ period: r.monthly_reports.report_month, note: commonRemittanceNote }))
+        : [];
 
       if (notesList.length > 0) {
           message += `\n*Notes:*\n`;
@@ -1441,8 +1811,14 @@ const MonthlyReports: React.FC = () => {
       if (doc) {
         const mInfo = filteredMerchantsList.find(m => m.id === mId);
         const mName = mInfo?.merchant.merchant_name || mInfo?.name || mId;
-        const monthStr = selected.length === 1 ? selected[0] : `${selected.length}_Months`;
-        doc.save(`Sales report - ${monthStr} - ${mName}.pdf`);
+        
+        // Sort months chronologically for filename
+        const sortedSelected = [...selected].sort(sortMonths);
+        const monthStr = sortedSelected.join('_');
+        
+        // Clean filename
+        const safeMName = mName.replace(/[^a-zA-Z0-9-_ ]/g, '').trim();
+        doc.save(`Powerpod Sales Report - ${safeMName} - ${monthStr}.pdf`);
       }
     } catch (err) {
       console.error(err);
@@ -1464,6 +1840,19 @@ const MonthlyReports: React.FC = () => {
   const pendingCount = reports.filter(r => !r.is_paid).length;
   const settledCount = reports.filter(r => r.is_paid).length;
   const globalGross = useMemo(() => reports.reduce((acc, r) => acc + n(r.total_sales), 0), [reports]);
+
+  if (!hasFeature('reports.view')) {
+    return (
+      <div className="space-y-6 animate-in fade-in duration-500 pb-20">
+        <div className="bg-white p-10 rounded-[40px] border border-gray-100 shadow-sm">
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Access Restricted</h1>
+          <p className="text-gray-500 mt-2 font-medium">
+            Reports is disabled for your identity. Ask an administrator to enable it.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-row gap-6 animate-in fade-in duration-500 pb-20 xl:-ml-6">
@@ -1619,6 +2008,15 @@ const MonthlyReports: React.FC = () => {
             <span>Settled ({settledCount})</span>
           </button>
         </div>
+
+        <button
+          onClick={downloadFinancialHubExcel}
+          disabled={loading || isExportingExcel || reports.length === 0}
+          className="w-full md:w-auto px-6 py-4 bg-white border border-gray-100 rounded-[28px] shadow-sm hover:border-blue-200 transition-all disabled:opacity-50 flex items-center justify-center gap-3"
+        >
+          {isExportingExcel ? <Loader2 size={18} className="animate-spin text-blue-600" /> : <Download size={18} className="text-blue-600" />}
+          <span className="text-[10px] font-black text-gray-700 uppercase tracking-widest">Download Excel</span>
+        </button>
       </div>
 
       {loading ? (
@@ -1653,7 +2051,8 @@ const MonthlyReports: React.FC = () => {
                         <h3 className="text-2xl font-black text-gray-900 tracking-tight uppercase leading-none">{mGroup.merchant.merchant_name || mGroup.name}</h3>
                         <button 
                           onClick={() => handleEditClick(mGroup.merchant)}
-                          className="text-gray-300 hover:text-blue-600 p-1 transition-colors"
+                          disabled={!hasFeature('merchants.edit')}
+                          className={`p-1 transition-colors ${hasFeature('merchants.edit') ? 'text-gray-300 hover:text-blue-600' : 'text-gray-200 cursor-not-allowed'}`}
                         >
                           <Edit2 size={18} />
                         </button>
@@ -1846,12 +2245,12 @@ const MonthlyReports: React.FC = () => {
                                 <td className="px-6 py-4">
                                   <button 
                                     onClick={() => togglePaymentStatus(p.id, p.is_paid)}
-                                    disabled={updatingPaymentId === p.id}
+                                    disabled={!hasFeature('reports.payment.toggle') || updatingPaymentId === p.id}
                                     className={`flex items-center space-x-2 px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all ${
                                       p.is_paid 
                                         ? 'bg-green-100 text-green-700 hover:bg-green-200' 
                                         : 'bg-amber-100 text-amber-700 hover:bg-amber-200'
-                                    }`}
+                                    } ${!hasFeature('reports.payment.toggle') ? 'opacity-50 cursor-not-allowed' : ''}`}
                                   >
                                     {updatingPaymentId === p.id ? (
                                       <RefreshCw size={10} className="animate-spin" />
@@ -1876,29 +2275,17 @@ const MonthlyReports: React.FC = () => {
                                         className="flex items-center space-x-2 hover:text-blue-600 transition-colors"
                                     >
                                         <span className="text-xs font-black text-gray-900 uppercase tracking-tight">{month}</span>
+                                        {internalNotes[p.id] && (
+                                            <div className="bg-blue-50 text-blue-600 p-1 rounded-md flex items-center justify-center" title="Has Internal Note">
+                                                <Lock size={8} />
+                                            </div>
+                                        )}
                                         <ChevronDown size={14} className={`transition-transform duration-300 ${expandedRows[p.id] ? 'rotate-180' : ''}`} />
                                     </button>
                                   </div>
                                 </td>
                                 <td className="px-6 py-4 text-right text-xs font-bold text-gray-600">AED {f(p.total_sales)}</td>
                                 <td className="px-6 py-4 text-right text-sm font-black text-blue-600">AED {f(p.merchant_payable)}</td>
-                                <td className="px-6 py-4">
-                                    <div className="relative">
-                                        <input 
-                                            type="text" 
-                                            className="w-full min-w-[150px] p-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-medium focus:ring-1 focus:ring-blue-500 outline-none transition-all placeholder:text-gray-400"
-                                            placeholder="Add note..."
-                                            value={remittanceNotes[p.id] || ''}
-                                            onChange={(e) => setRemittanceNotes(prev => ({ ...prev, [p.id]: e.target.value }))}
-                                            onBlur={() => saveRemittanceNote(p.id)}
-                                        />
-                                        {savingNotes[p.id] && (
-                                            <div className="absolute right-2 top-1/2 -translate-y-1/2">
-                                                <Loader2 className="animate-spin text-blue-500" size={12} />
-                                            </div>
-                                        )}
-                                    </div>
-                                </td>
                                 <td className="px-6 py-4 text-right">
                                    <div className="flex justify-end space-x-2">
                                       <button 
@@ -1909,6 +2296,34 @@ const MonthlyReports: React.FC = () => {
                                         <ArrowUpRight size={16} />
                                       </button>
                                    </div>
+                                </td>
+                              </tr>
+                              {/* Always Visible Internal Note Row */}
+                              <tr className={`${isSelected ? 'bg-white' : 'bg-gray-50/30'} border-none`}>
+                                <td colSpan={6} className="px-6 pb-4 pt-0 border-t-0">
+                                    <div className="flex items-start gap-4">
+                                        <div className="shrink-0 mt-2">
+                                            <div className="flex items-center text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                                <Lock size={10} className="mr-1" /> Note
+                                            </div>
+                                        </div>
+                                        <div className="flex-1 relative">
+                                            <textarea
+                                                className="w-full bg-transparent border-b border-gray-200 py-1 text-xs font-medium focus:border-blue-500 outline-none resize-none transition-all placeholder:text-gray-300"
+                                                rows={1}
+                                                placeholder="Add a private note..."
+                                                value={internalNotes[p.id] || ''}
+                                                onChange={(e) => setInternalNotes(prev => ({ ...prev, [p.id]: e.target.value }))}
+                                                onBlur={() => saveInternalNote(p.id, internalNotes[p.id])}
+                                                style={{ minHeight: '28px' }}
+                                            />
+                                            {savingInternalNotes[p.id] && (
+                                                <div className="absolute right-0 top-1/2 -translate-y-1/2 flex items-center text-[9px] font-bold text-blue-500">
+                                                    <Loader2 size={8} className="animate-spin mr-1" /> Saving
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
                                 </td>
                               </tr>
                               {expandedRows[p.id] && (
@@ -2127,10 +2542,10 @@ const MonthlyReports: React.FC = () => {
                 <div className="flex space-x-4">
                    <button 
                      onClick={() => togglePaymentStatus(detailSummary.id, detailSummary.is_paid)}
-                     disabled={updatingPaymentId === detailSummary.id}
+                     disabled={!hasFeature('reports.payment.toggle') || updatingPaymentId === detailSummary.id}
                      className={`px-8 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-xl flex items-center space-x-2 ${
                        detailSummary.is_paid ? 'bg-green-600 text-white' : 'bg-amber-500 text-white'
-                     }`}
+                     } ${!hasFeature('reports.payment.toggle') ? 'opacity-50 cursor-not-allowed' : ''}`}
                    >
                      {updatingPaymentId === detailSummary.id ? <RefreshCw size={14} className="animate-spin" /> : detailSummary.is_paid ? <Check size={14} /> : <Clock size={14} />}
                      <span>Mark as {detailSummary.is_paid ? 'Unpaid' : 'Settled'}</span>
@@ -2145,8 +2560,8 @@ const MonthlyReports: React.FC = () => {
       {/* Dispatch Modals */}
       {activeDispatch && (
         <div className="fixed inset-0 z-[150] flex items-center justify-center p-6 bg-gray-950/40 backdrop-blur-md">
-          <div className="bg-white w-full max-w-2xl rounded-[40px] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 border border-gray-100">
-            <div className="p-8 border-b border-gray-50 flex justify-between items-center bg-gray-50/50">
+          <div className="bg-white w-full max-w-2xl max-h-[90vh] flex flex-col rounded-[40px] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 border border-gray-100">
+            <div className="p-8 border-b border-gray-50 flex justify-between items-center bg-gray-50/50 shrink-0">
                <div className="flex items-center space-x-4">
                  <div className={`p-3 rounded-2xl ${activeDispatch.type === 'email' ? 'bg-blue-50 text-blue-600' : 'bg-green-50 text-green-600'}`}>
                    {activeDispatch.type === 'email' ? <Mail size={24} /> : <MessageSquare size={24} />}
@@ -2161,7 +2576,7 @@ const MonthlyReports: React.FC = () => {
                </button>
             </div>
 
-            <div className="p-10 space-y-6">
+            <div className="p-10 space-y-6 overflow-y-auto">
               {activeDispatch.type === 'email' ? (
                 <div className="space-y-6">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -2171,16 +2586,104 @@ const MonthlyReports: React.FC = () => {
                     </div>
                     <div className="space-y-2">
                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">CC Copy</label>
-                       <input type="email" className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none" value={activeDispatch.cc} onChange={(e) => setActiveDispatch({...activeDispatch, cc: e.target.value})} />
+                       <input
+                         type="text"
+                         placeholder="comma separated"
+                         className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none"
+                         value={activeDispatch.cc}
+                         onChange={(e) => setActiveDispatch({...activeDispatch, cc: e.target.value})}
+                       />
+                       {ccHistory.length > 0 && (
+                         <div className="mt-2 flex flex-wrap gap-2">
+                           {ccHistory.map(email => (
+                             <button
+                               key={email}
+                               type="button"
+                               onClick={() => {
+                                 const current = normalizeEmails(activeDispatch.cc || '');
+                                 const exists = current.some(e => e.toLowerCase() === email.toLowerCase());
+                                 const next = exists ? current : [...current, email];
+                                 setActiveDispatch({ ...activeDispatch, cc: next.join(', ') });
+                               }}
+                               className="px-3 py-1 bg-white border border-gray-200 rounded-lg text-[9px] font-black text-gray-500 hover:text-blue-600 hover:border-blue-200 transition-all"
+                             >
+                               {email}
+                             </button>
+                           ))}
+                         </div>
+                       )}
                     </div>
                   </div>
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">BCC Audit</label>
                     <input type="email" className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none" value={activeDispatch.bcc} onChange={(e) => setActiveDispatch({...activeDispatch, bcc: e.target.value})} />
+                    {bccHistory.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {bccHistory.map(email => (
+                          <button
+                            key={email}
+                            type="button"
+                            onClick={() => {
+                              const current = normalizeEmails(activeDispatch.bcc || '');
+                              const exists = current.some(e => e.toLowerCase() === email.toLowerCase());
+                              const next = exists ? current : [...current, email];
+                              setActiveDispatch({ ...activeDispatch, bcc: next.join(', ') });
+                            }}
+                            className="px-3 py-1 bg-white border border-gray-200 rounded-lg text-[9px] font-black text-gray-500 hover:text-blue-600 hover:border-blue-200 transition-all"
+                          >
+                            {email}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Email Subject</label>
                     <input type="text" className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none" value={activeDispatch.subject} onChange={(e) => setActiveDispatch({...activeDispatch, subject: e.target.value})} />
+                  </div>
+                  <div className="space-y-4">
+                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Remittance Note</label>
+                    <textarea
+                      className="w-full bg-white border border-gray-200 px-4 py-3 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none"
+                      value={activeDispatch.notes[COMMON_REMITTANCE_NOTE_KEY] || ''}
+                      onChange={(e) => setActiveDispatch({
+                        ...activeDispatch,
+                        notes: { ...activeDispatch.notes, [COMMON_REMITTANCE_NOTE_KEY]: e.target.value }
+                      })}
+                      rows={4}
+                      placeholder="Enter a single note to apply to all selected periods..."
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Additional Attachments</label>
+                    <input 
+                        type="file" 
+                        multiple
+                        className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-black file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                        onChange={(e) => {
+                            if (e.target.files) {
+                                setActiveDispatch({...activeDispatch, additionalAttachments: Array.from(e.target.files)});
+                            }
+                        }}
+                    />
+                    {activeDispatch.additionalAttachments && activeDispatch.additionalAttachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mt-2">
+                            {activeDispatch.additionalAttachments.map((file, idx) => (
+                                <span key={idx} className="bg-gray-100 px-3 py-1 rounded-lg text-[10px] font-bold text-gray-600 flex items-center">
+                                    {file.name}
+                                    <button 
+                                        onClick={() => {
+                                            const newFiles = activeDispatch.additionalAttachments?.filter((_, i) => i !== idx);
+                                            setActiveDispatch({...activeDispatch, additionalAttachments: newFiles});
+                                        }}
+                                        className="ml-2 text-red-400 hover:text-red-600"
+                                    >
+                                        <CloseIcon size={10} />
+                                    </button>
+                                </span>
+                            ))}
+                        </div>
+                    )}
                   </div>
                   <div className="bg-blue-50/30 p-4 rounded-2xl border border-blue-50 flex items-center space-x-3">
                     <Server size={14} className="text-blue-500" />
@@ -2193,6 +2696,19 @@ const MonthlyReports: React.FC = () => {
                     <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1 flex items-center"><Phone size={10} className="mr-1" /> Mobile Number</label>
                     <input type="text" className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none" value={activeDispatch.phone} onChange={(e) => setActiveDispatch({...activeDispatch, phone: e.target.value})} placeholder="+971..." />
                   </div>
+                  <div className="space-y-4">
+                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Remittance Note</label>
+                    <textarea
+                      className="w-full bg-white border border-gray-200 px-4 py-3 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none"
+                      value={activeDispatch.notes[COMMON_REMITTANCE_NOTE_KEY] || ''}
+                      onChange={(e) => setActiveDispatch({
+                        ...activeDispatch,
+                        notes: { ...activeDispatch.notes, [COMMON_REMITTANCE_NOTE_KEY]: e.target.value }
+                      })}
+                      rows={4}
+                      placeholder="Enter a single note to apply to all selected periods..."
+                    />
+                  </div>
                   <div className="bg-green-50/30 p-6 rounded-3xl border border-green-50">
                     <p className="text-xs font-bold text-green-900 leading-relaxed">System will generate a summary and hand over to WhatsApp Mobile/Web for final delivery.</p>
                   </div>
@@ -2201,7 +2717,13 @@ const MonthlyReports: React.FC = () => {
               
               <div className="mt-10 flex space-x-4">
                 <button onClick={() => setActiveDispatch(null)} className="flex-1 px-8 py-5 rounded-3xl font-bold text-gray-500 hover:bg-gray-100 transition-all">Cancel</button>
-                <button onClick={activeDispatch.type === 'email' ? executeEmailDispatch : executeWhatsAppDispatch} className={`flex-[2] py-5 rounded-3xl text-white font-black uppercase tracking-widest shadow-2xl transition-all active:scale-95 ${activeDispatch.type === 'email' ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20' : 'bg-[#4ADE80] hover:bg-[#22C55E] shadow-green-500/20'}`}>Confirm & Send</button>
+                <button
+                  onClick={activeDispatch.type === 'email' ? executeEmailDispatch : executeWhatsAppDispatch}
+                  disabled={activeDispatch.type === 'email' ? !hasFeature('reports.send.email') : !hasFeature('reports.send.whatsapp')}
+                  className={`flex-[2] py-5 rounded-3xl text-white font-black uppercase tracking-widest shadow-2xl transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed ${activeDispatch.type === 'email' ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20' : 'bg-[#4ADE80] hover:bg-[#22C55E] shadow-green-500/20'}`}
+                >
+                  Confirm & Send
+                </button>
               </div>
             </div>
           </div>
@@ -2309,6 +2831,27 @@ const MonthlyReports: React.FC = () => {
                               <option value="whatsapp">WhatsApp</option>
                           </select>
                       </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                          <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Reporting Email</label>
+                          <input 
+                            type="email"
+                            className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                            value={editingMerchant.reporting_email || ''}
+                            onChange={(e) => setEditingMerchant({...editingMerchant, reporting_email: e.target.value})}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Reporting WhatsApp</label>
+                          <input 
+                            type="text"
+                            placeholder="e.g. 0501234567 or 971501234567"
+                            className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                            value={editingMerchant.reporting_whatsapp || ''}
+                            onChange={(e) => setEditingMerchant({...editingMerchant, reporting_whatsapp: e.target.value})}
+                          />
+                        </div>
+                      </div>
                       <div className="space-y-2">
                           <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Notes</label>
                           <textarea 
@@ -2415,9 +2958,24 @@ const MonthlyReports: React.FC = () => {
                           )}
                           <input 
                             type="number"
+                            min={0}
+                            max={editingMerchant.contract_type === 'Fixed Charge - Monthly' ? undefined : 100}
+                            step={editingMerchant.contract_type === 'Fixed Charge - Monthly' ? 0.01 : 1}
                             className="w-full bg-gray-50 border-none pl-10 pr-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
                             value={editingMerchant.revenue_share_percentage}
-                            onChange={(e) => setEditingMerchant({...editingMerchant, revenue_share_percentage: Number(e.target.value)})}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              const next = raw === '' ? 0 : Number(raw);
+                              if (Number.isNaN(next)) return;
+
+                              if (editingMerchant.contract_type === 'Fixed Charge - Monthly') {
+                                setEditingMerchant({ ...editingMerchant, revenue_share_percentage: next });
+                                return;
+                              }
+
+                              const clamped = Math.min(100, Math.max(0, next));
+                              setEditingMerchant({ ...editingMerchant, revenue_share_percentage: clamped });
+                            }}
                           />
                         </div>
                       </div>
