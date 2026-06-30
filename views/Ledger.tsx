@@ -10,17 +10,23 @@ import {
   Search, 
   ChevronDown, 
   Download,
-  DollarSign
+  DollarSign,
+  PlusCircle,
+  Paperclip,
+  Tag,
+  Activity
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Account, JournalEntry, JournalItem } from '../types';
 import { useAccessControl } from '../lib/AccessControlContext';
+import ComplexJournalEntryForm from './ComplexJournalEntryForm';
 
 const Ledger: React.FC = () => {
   const { hasFeature } = useAccessControl();
-  const [activeTab, setActiveTab] = useState<'journal' | 'trial' | 'pnl' | 'balance'>('journal');
+  const [activeTab, setActiveTab] = useState<'journal' | 'trial' | 'pnl' | 'balance' | 'adjusting'>('journal');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showJVForm, setShowJVForm] = useState(false);
 
   // General Ledger General data
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -145,12 +151,29 @@ const Ledger: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* JV Form Modal */}
+      {showJVForm && (
+        <ComplexJournalEntryForm
+          onClose={() => setShowJVForm(false)}
+          onPosted={() => { setShowJVForm(false); fetchLedgerData(); }}
+        />
+      )}
+
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-2xl font-black text-gray-900 tracking-tight">General Ledger & Accounts</h1>
           <p className="text-gray-500 text-sm font-semibold">Consolidated double-entry financial statements and journals</p>
         </div>
+        {hasFeature('ledger.journal.write') && (
+          <button
+            onClick={() => setShowJVForm(true)}
+            className="flex items-center space-x-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm transition-all shadow-sm shadow-blue-200"
+          >
+            <PlusCircle size={16} />
+            <span>New Journal Entry</span>
+          </button>
+        )}
       </div>
 
       {/* Tabs */}
@@ -165,6 +188,17 @@ const Ledger: React.FC = () => {
         >
           <BookOpen size={16} />
           <span>General Journal</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('adjusting')}
+          className={`flex items-center space-x-2 px-4 py-2 text-sm font-bold border-b-2 transition duration-150 ${
+            activeTab === 'adjusting' 
+              ? 'border-amber-500 text-amber-600' 
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Tag size={16} />
+          <span>Adjusting Entries</span>
         </button>
         <button
           onClick={() => setActiveTab('trial')}
@@ -215,8 +249,12 @@ const Ledger: React.FC = () => {
         </div>
       ) : (
         <div className="space-y-6">
-          {/* TAB 1: GENERAL JOURNAL */}
-          {activeTab === 'journal' && (
+          {/* TAB: JOURNALS (General + Adjusting) */}
+          {(activeTab === 'journal' || activeTab === 'adjusting') && (() => {
+            const tabEntries = activeTab === 'adjusting'
+              ? filteredEntries.filter((e: any) => e.is_adjusting_entry)
+              : filteredEntries.filter((e: any) => !e.is_adjusting_entry);
+            return (
             <div className="space-y-4">
               {/* Filters */}
               <div className="flex space-x-3 bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
@@ -243,13 +281,21 @@ const Ledger: React.FC = () => {
               </div>
 
               {/* Journal Table */}
-              {filteredEntries.length === 0 ? (
+              {activeTab === 'adjusting' && tabEntries.length === 0 && (
+                <div className="flex items-center space-x-3 p-4 bg-amber-50 border border-amber-200 rounded-xl text-amber-700 text-sm mb-2">
+                  <Tag size={16} className="shrink-0" />
+                  <span className="font-bold">
+                    No month-end adjusting entries found. Use the <strong>New Journal Entry</strong> button, select an Entry Type (e.g. Amortisation) and tick <strong>Mark as Adjusting</strong>.
+                  </span>
+                </div>
+              )}
+              {tabEntries.length === 0 && activeTab !== 'adjusting' ? (
                 <div className="text-center p-12 bg-white rounded-xl border border-gray-200 shadow-sm text-gray-500 font-bold">
                   No Journal Vouchers Found matching filters.
                 </div>
-              ) : (
+              ) : tabEntries.length > 0 ? (
                 <div className="space-y-4">
-                  {filteredEntries.map(entry => (
+                  {tabEntries.map((entry: any) => (
                     <div key={entry.id} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                       <div className="px-6 py-3 bg-gray-50 border-b border-gray-100 flex justify-between items-center text-xs">
                         <div className="flex items-center space-x-3">
@@ -259,12 +305,43 @@ const Ledger: React.FC = () => {
                             <Calendar size={12} />
                             <span>{entry.entry_date}</span>
                           </div>
+                          {entry.is_adjusting_entry && (
+                            <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-100 text-amber-700">
+                              <Tag size={9} /><span>Adjusting</span>
+                            </span>
+                          )}
+                          {entry.entry_type && entry.entry_type !== 'other' && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-slate-100 text-slate-600">
+                              {entry.entry_type.replace('_', ' ')}
+                            </span>
+                          )}
                         </div>
-                        <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
-                          entry.status === 'posted' ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-800'
-                        }`}>
-                          {entry.status}
-                        </span>
+                        <div className="flex items-center space-x-2">
+                          {entry.attachment_url && (
+                            <a
+                              href={entry.attachment_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center space-x-1 text-blue-600 hover:text-blue-800 font-bold"
+                              title={entry.attachment_name || 'View attachment'}
+                            >
+                              <Paperclip size={12} />
+                              <span className="text-[10px]">{entry.attachment_name || 'Attachment'}</span>
+                            </a>
+                          )}
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                            entry.status === 'posted' ? 'bg-emerald-100 text-emerald-800'
+                            : entry.status === 'voided' ? 'bg-red-100 text-red-800'
+                            : 'bg-gray-100 text-gray-800'
+                          }`}>
+                            {entry.status}
+                          </span>
+                          {entry.period_locked && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-red-100 text-red-700">
+                              🔒 Locked
+                            </span>
+                          )}
+                        </div>
                       </div>
                       
                       <div className="p-4 bg-gray-50/20 border-b border-gray-100">
@@ -303,9 +380,10 @@ const Ledger: React.FC = () => {
                     </div>
                   ))}
                 </div>
-              )}
+              ) : null}
             </div>
-          )}
+            );
+          })()}
 
           {/* TAB 2: TRIAL BALANCE */}
           {activeTab === 'trial' && (

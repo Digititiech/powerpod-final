@@ -163,7 +163,8 @@ INSERT INTO accounts (code, name, class, is_active) VALUES
 ('5100', 'Location Revenue Share Cost', 'expense', true),
 ('5200', 'Stripe Processing Fees Expense', 'expense', true),
 ('5300', 'Station Depreciation Expense', 'expense', true),
-('5400', 'Maintenance & Repair Expense', 'expense', true)
+('5400', 'Maintenance & Repair Expense', 'expense', true),
+('6900', 'Other Operating Expenses', 'expense', true)
 ON CONFLICT (code) DO NOTHING;
 
 -- 11. Populate Default Cost Centers

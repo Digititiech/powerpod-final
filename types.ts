@@ -1,7 +1,7 @@
 
-export type UserRole = 'admin' | 'staff' | 'technician';
+export type UserRole = 'admin' | 'staff' | 'technician' | 'accountant';
 
-export type View = 'dashboard' | 'merchants' | 'assets' | 'processor' | 'reports' | 'settings' | 'users' | 'transactions' | 'employees' | 'payroll' | 'ledger';
+export type View = 'dashboard' | 'merchants' | 'assets' | 'processor' | 'reports' | 'settings' | 'users' | 'transactions' | 'employees' | 'payroll' | 'ledger' | 'accounting-help' | 'finance-hub' | 'company-settings';
 
 export type FeatureKey =
   | 'mode.viewOnly'
@@ -33,7 +33,22 @@ export type FeatureKey =
   | 'settings.commit'
   | 'settings.db.test'
   | 'settings.whatsapp.view'
-  | 'settings.whatsapp.disconnect';
+  | 'settings.whatsapp.disconnect'
+  // Accounting / Ledger
+  | 'nav.accounting-help'
+  | 'nav.finance-hub'
+  | 'nav.company-settings'
+  | 'ledger.journal.write'
+  | 'ledger.period.lock'
+  // Finance Hub modules
+  | 'finance.income.upload'
+  | 'finance.expense.create'
+  | 'finance.treasury.create'
+  | 'finance.loans.manage'
+  | 'finance.reconciliation.run'
+  | 'finance.payroll.approve'
+  | 'finance.tax.view'
+  | 'finance.tax.clear';
 
 export type FeatureFlags = Partial<Record<FeatureKey, boolean>> & Record<string, boolean>;
 
@@ -174,11 +189,14 @@ export type JournalEntryStatus = 'draft' | 'posted' | 'voided';
 export type EmployeeStatus = 'active' | 'inactive' | 'terminated';
 export type PayrollStatus = 'draft' | 'approved' | 'paid';
 
+export type CashFlowCategory = 'operating' | 'investing' | 'financing' | 'none';
+
 export interface Account {
   id: string;
   code: string;
   name: string;
   class: AccountClass;
+  cash_flow_category: CashFlowCategory;
   parent_id?: string | null;
   is_active: boolean;
   created_at: string;
@@ -193,6 +211,15 @@ export interface CostCenter {
   created_at: string;
 }
 
+export type JournalEntryType =
+  | 'accrual'
+  | 'amortisation'
+  | 'loan_draw'
+  | 'loan_repay'
+  | 'interest'
+  | 'depreciation'
+  | 'other';
+
 export interface JournalEntry {
   id: string;
   entry_date: string;
@@ -200,6 +227,10 @@ export interface JournalEntry {
   description?: string | null;
   status: JournalEntryStatus;
   period_locked: boolean;
+  is_adjusting_entry: boolean;
+  entry_type: JournalEntryType;
+  attachment_url?: string | null;
+  attachment_name?: string | null;
   created_by?: string | null;
   created_at: string;
   updated_at: string;
@@ -255,9 +286,155 @@ export interface Payslip {
   base_salary: number;
   allowances: number;
   deductions: number;
+  advances?: number;
   net_salary: number;
   payment_method?: string | null;
   reference_number?: string | null;
   created_at: string;
 }
 
+// ─── Finance Hub Types ────────────────────────────────────────────────────────
+
+export interface Supplier {
+  id: string;
+  name: string;
+  contact_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  trn?: string | null;
+  address?: string | null;
+  default_expense_account_code: string;
+  notes?: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ExpenseCategory =
+  | 'rent_utilities'
+  | 'bank_charges'
+  | 'office_supplies'
+  | 'hardware_equipment'
+  | 'marketing'
+  | 'professional_services'
+  | 'salaries_manual'
+  | 'insurance'
+  | 'travel'
+  | 'other';
+
+export const EXPENSE_CATEGORY_MAP: Record<ExpenseCategory, { label: string; drAccountCode: string }> = {
+  rent_utilities:        { label: 'Rent & Utilities',          drAccountCode: '6100' },
+  bank_charges:          { label: 'Bank Charges & Finance',    drAccountCode: '6500' },
+  office_supplies:       { label: 'Office Supplies',           drAccountCode: '6200' },
+  hardware_equipment:    { label: 'Hardware / Equipment',      drAccountCode: '1500' },
+  marketing:             { label: 'Marketing & Advertising',   drAccountCode: '6300' },
+  professional_services: { label: 'Professional Services',     drAccountCode: '6800' },
+  salaries_manual:       { label: 'Salaries (Manual)',         drAccountCode: '5000' },
+  insurance:             { label: 'Insurance',                 drAccountCode: '6700' },
+  travel:                { label: 'Travel & Transportation',   drAccountCode: '6150' },
+  other:                 { label: 'Other / General',           drAccountCode: '6900' },
+};
+
+export interface Expense {
+  id: string;
+  expense_date: string;
+  supplier_id?: string | null;
+  supplier_name: string;
+  category: ExpenseCategory;
+  amount_ex_vat: number;
+  vat_amount: number;
+  total_amount: number;
+  has_vat: boolean;
+  notes?: string | null;
+  receipt_url?: string | null;
+  status: 'posted' | 'voided';
+  journal_entry_id?: string | null;
+  created_at: string;
+}
+
+export type VoucherType = 'receipt' | 'payment';
+export type VoucherPurpose =
+  | 'clear_ar'
+  | 'clear_ap'
+  | 'loan_drawdown'
+  | 'loan_repayment'
+  | 'salary_payment'
+  | 'other_income'
+  | 'other_payment';
+
+export interface TreasuryVoucher {
+  id: string;
+  voucher_type: VoucherType;
+  voucher_number?: string | null;
+  voucher_date: string;
+  party_name: string;
+  amount: number;
+  bank_account_code: string;
+  purpose: string;
+  reference?: string | null;
+  notes?: string | null;
+  attachment_url?: string | null;
+  status: 'posted' | 'voided';
+  journal_entry_id?: string | null;
+  created_at: string;
+}
+
+export interface BankLoan {
+  id: string;
+  bank_name: string;
+  loan_reference?: string | null;
+  principal_amount: number;
+  outstanding_balance: number;
+  annual_interest_rate: number;
+  monthly_payment?: number | null;
+  drawdown_date: string;
+  maturity_date?: string | null;
+  loan_type: 'short_term' | 'long_term';
+  account_code: string;
+  status: 'active' | 'settled' | 'written_off';
+  notes?: string | null;
+  created_at: string;
+}
+
+export interface LoanRepayment {
+  id: string;
+  loan_id: string;
+  payment_date: string;
+  principal_paid: number;
+  interest_paid: number;
+  other_charges: number;
+  total_paid: number;
+  reference?: string | null;
+  journal_entry_id?: string | null;
+  created_at: string;
+}
+
+export interface BankReconciliationSession {
+  id: string;
+  session_name: string;
+  period_start: string;
+  period_end: string;
+  bank_account_code: string;
+  bank_closing_balance?: number | null;
+  system_closing_balance?: number | null;
+  status: 'in_progress' | 'completed';
+  column_map?: Record<string, string> | null;
+  created_at: string;
+}
+
+export interface BankStatementLine {
+  id: string;
+  session_id: string;
+  line_date: string;
+  description?: string | null;
+  debit: number;
+  credit: number;
+  balance?: number | null;
+  matched_je_id?: string | null;
+  match_status: 'unmatched' | 'matched' | 'bank_only';
+}
+
+export interface CompanySetting {
+  key: string;
+  value: string | null;
+}

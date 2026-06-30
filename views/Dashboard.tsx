@@ -181,128 +181,175 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       const { count: mCount } = await supabase.from('merchants').select('*', { count: 'exact', head: true });
       const { count: sCount } = await supabase.from('stations').select('*', { count: 'exact', head: true });
 
-      // 2. Calculate Total Sales & Payout from Transactions (Source of Truth)
-      
-      const CHUNK_SIZE = 1000;
-      let allAmounts: number[] = [];
-      const chartMap = new Map<string, { sales: number; payout: number }>();
-      const processedFixedMerchants = new Set<string>(); // To track fixed charge application per month
-      
       let totalRevenue = 0;
       let totalPayout = 0;
       let totalPending = 0;
-      let rankingMap = new Map();
+      let totalStripeFees = 0;
+      const chartMap = new Map<string, { sales: number; payout: number }>();
+      const rankingMap = new Map();
 
-      let hasMore = true;
-      let offset = 0;
-      
-      // Fetch in chunks to avoid timeouts/limits
-      while (hasMore) {
-          let txQuery = supabase.from('sales_transactions')
+      // Check if we have a custom date range
+      const hasDateRange = dateRange.start || dateRange.end;
+
+      if (hasDateRange) {
+        // Fallback: Query transactions for the specific range
+        let txQuery = supabase.from('sales_transactions')
+          .select(`
+            amount,
+            stripe_fee,
+            tax_fee,
+            transaction_date,
+            venue_name,
+            merchant_period_summaries!inner (
+               is_paid,
+               merchant_id,
+               monthly_reports!inner (report_month)
+            )
+          `);
+
+        if (paymentFilter === 'PENDING') txQuery = txQuery.eq('merchant_period_summaries.is_paid', false);
+        if (paymentFilter === 'SETTLED') txQuery = txQuery.eq('merchant_period_summaries.is_paid', true);
+        
+        if (selectedMonths.length > 0) {
+          txQuery = txQuery.in('merchant_period_summaries.monthly_reports.report_month', selectedMonths);
+        }
+
+        if (dateRange.start) {
+          txQuery = txQuery.gte('transaction_date', `${dateRange.start} 00:00:00`);
+        }
+        if (dateRange.end) {
+          txQuery = txQuery.lte('transaction_date', `${dateRange.end} 23:59:59`);
+        }
+
+        // Fetch up to 10,000 transactions in the range (ranges are usually short-term)
+        const { data: txList, error } = await txQuery.limit(10000);
+        if (error) throw error;
+
+        const processedFixedMerchants = new Set<string>();
+
+        (txList || []).forEach((tx: any) => {
+          const amount = Number(tx.amount) || 0;
+          const stripe = Number(tx.stripe_fee) || 0;
+          const tax = Number(tx.tax_fee) || 0;
+          const netSales = amount - stripe - tax;
+
+          const reportMonth = tx.merchant_period_summaries?.monthly_reports?.report_month;
+          let chartKey = reportMonth;
+          if (!chartKey) {
+            const dateObj = new Date(tx.transaction_date);
+            chartKey = dateObj.toLocaleString('en-US', { month: 'short', year: 'numeric' }); 
+          }
+
+          const mId = tx.merchant_period_summaries?.merchant_id;
+          const merchant = merchantContractMap.get(mId);
+          let txPayout = 0;
+
+          if (merchant) {
+            if (merchant.contract_type === 'Fixed Charge - Monthly') {
+              const fixedKey = `${mId}_${chartKey}`;
+              if (!processedFixedMerchants.has(fixedKey)) {
+                txPayout = Number(merchant.revenue_share_percentage) || 0;
+                processedFixedMerchants.add(fixedKey);
+              }
+            } else {
+              txPayout = netSales * ((Number(merchant.revenue_share_percentage) || 0) / 100);
+            }
+          }
+
+          totalRevenue += amount;
+          totalStripeFees += stripe;
+          totalPayout += txPayout;
+          if (tx.merchant_period_summaries?.is_paid === false) {
+            totalPending += txPayout;
+          }
+
+          const currentChartVal = chartMap.get(chartKey) || { sales: 0, payout: 0 };
+          currentChartVal.sales += amount;
+          currentChartVal.payout += txPayout;
+          chartMap.set(chartKey, currentChartVal);
+
+          const existing = rankingMap.get(mId) || { 
+            name: merchant?.merchant_name || 'Unknown',
+            company: merchant?.company_name || 'Unknown',
+            sales: 0
+          };
+          existing.sales += amount;
+          rankingMap.set(mId, existing);
+        });
+
+      } else {
+        // High Performance: Query pre-aggregated monthly summaries directly
+        let sumList: any[] = [];
+        let hasMoreSummaries = true;
+        let sumOffset = 0;
+        const LIMIT = 1000;
+
+        while (hasMoreSummaries) {
+          let sumQuery = supabase
+            .from('merchant_period_summaries')
             .select(`
-              amount,
-              stripe_fee,
-              tax_fee,
-              transaction_date,
-              venue_name,
-              merchant_period_summaries!inner (
-                 is_paid,
-                 merchant_id,
-                 monthly_reports!inner (report_month)
+              total_sales,
+              stripe_fees,
+              tax_amount,
+              merchant_payable,
+              net_profit,
+              is_paid,
+              merchant_name,
+              merchant_id,
+              monthly_reports!inner (
+                report_month
               )
             `);
 
-          if (paymentFilter === 'PENDING') txQuery = txQuery.eq('merchant_period_summaries.is_paid', false);
-          if (paymentFilter === 'SETTLED') txQuery = txQuery.eq('merchant_period_summaries.is_paid', true);
-          
+          if (paymentFilter === 'PENDING') {
+            sumQuery = sumQuery.eq('is_paid', false);
+          } else if (paymentFilter === 'SETTLED') {
+            sumQuery = sumQuery.eq('is_paid', true);
+          }
+
           if (selectedMonths.length > 0) {
-            txQuery = txQuery.in('merchant_period_summaries.monthly_reports.report_month', selectedMonths);
+            sumQuery = sumQuery.in('monthly_reports.report_month', selectedMonths);
           }
 
-          if (dateRange.start) {
-            txQuery = txQuery.gte('transaction_date', `${dateRange.start} 00:00:00`);
-          }
-          if (dateRange.end) {
-            txQuery = txQuery.lte('transaction_date', `${dateRange.end} 23:59:59`);
-          }
-          
-          const { data: chunk, error } = await txQuery.range(offset, offset + CHUNK_SIZE - 1);
-          
-          if (error) {
-              console.error('Error fetching transaction chunk:', error);
-              break;
-          }
-          
+          const { data: chunk, error } = await sumQuery.range(sumOffset, sumOffset + LIMIT - 1);
+          if (error) throw error;
+
           if (chunk && chunk.length > 0) {
-              chunk.forEach((tx: any) => {
-                  const amount = Number(tx.amount) || 0;
-                  const stripe = Number(tx.stripe_fee) || 0;
-                  const tax = Number(tx.tax_fee) || 0;
-                  
-                  // Net Sales available for split
-                  const netSales = amount - stripe - tax;
-
-                  // Chart Data (Group by Month)
-                  const reportMonth = tx.merchant_period_summaries?.monthly_reports?.report_month;
-                  let chartKey = reportMonth;
-
-                  if (!chartKey) {
-                    const dateObj = new Date(tx.transaction_date);
-                    chartKey = dateObj.toLocaleString('en-US', { month: 'short', year: 'numeric' }); 
-                  }
-                  
-                  // Calculate Payout based on Contract
-                  const mId = tx.merchant_period_summaries?.merchant_id;
-                  const merchant = merchantContractMap.get(mId);
-                  
-                  let txPayout = 0;
-                  
-                  if (merchant) {
-                    if (merchant.contract_type === 'Fixed Charge - Monthly') {
-                        // Fixed Charge Logic: Add fixed amount ONCE per month per merchant
-                        const fixedKey = `${mId}_${chartKey}`;
-                        if (!processedFixedMerchants.has(fixedKey)) {
-                            const fixedAmount = Number(merchant.revenue_share_percentage) || 0;
-                            txPayout = fixedAmount; 
-                            processedFixedMerchants.add(fixedKey);
-                        }
-                    } else {
-                        // Revenue Share Logic: (Net Sales * Share %)
-                        const share = Number(merchant.revenue_share_percentage) || 0;
-                        txPayout = netSales * (share / 100);
-                    }
-                  }
-
-                  // Update Totals
-                  totalRevenue += amount;
-                  totalPayout += txPayout;
-                  
-                  if (tx.merchant_period_summaries?.is_paid === false) {
-                      totalPending += txPayout;
-                  }
-
-                  // Update Chart
-                  const currentChartVal = chartMap.get(chartKey) || { sales: 0, payout: 0 };
-                  currentChartVal.sales += amount;
-                  currentChartVal.payout += txPayout;
-                  chartMap.set(chartKey, currentChartVal);
-
-                  // Update Ranking
-                  const existing = rankingMap.get(mId) || { 
-                      name: merchant?.merchant_name || 'Unknown',
-                      company: merchant?.company_name || 'Unknown',
-                      sales: 0
-                  };
-                  existing.sales += amount;
-                  rankingMap.set(mId, existing);
-              });
-
-              offset += CHUNK_SIZE;
-              
-              if (chunk.length < CHUNK_SIZE) hasMore = false;
+            sumList = [...sumList, ...chunk];
+            sumOffset += LIMIT;
+            if (chunk.length < LIMIT) hasMoreSummaries = false;
           } else {
-              hasMore = false;
+            hasMoreSummaries = false;
           }
+        }
+
+        (sumList || []).forEach((sum: any) => {
+          const sales = Number(sum.total_sales) || 0;
+          const payout = Number(sum.merchant_payable) || 0;
+          const reportMonth = sum.monthly_reports?.report_month || 'Unknown';
+
+          totalRevenue += sales;
+          totalStripeFees += Number(sum.stripe_fees) || 0;
+          totalPayout += payout;
+          if (sum.is_paid === false) {
+            totalPending += payout;
+          }
+
+          const currentChartVal = chartMap.get(reportMonth) || { sales: 0, payout: 0 };
+          currentChartVal.sales += sales;
+          currentChartVal.payout += payout;
+          chartMap.set(reportMonth, currentChartVal);
+
+          const mId = sum.merchant_id;
+          const merchant = merchantContractMap.get(mId);
+          const existing = rankingMap.get(mId) || { 
+            name: sum.merchant_name || 'Unknown',
+            company: merchant?.company_name || 'Unknown',
+            sales: 0
+          };
+          existing.sales += sales;
+          rankingMap.set(mId, existing);
+        });
       }
 
       // Platform Net Income = Total Sales - Total Merchant Payout
@@ -339,6 +386,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           }
         });
       }
+      
+      const finalCollectedCash = cashStripe > 0 ? cashStripe : (totalRevenue - totalStripeFees);
 
       setStats({
         revenue: totalRevenue,
@@ -348,7 +397,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         pendingPayouts: totalPending,
         payout: totalPayout,
         netIncome: platformNetIncome,
-        collectedRevenue: cashStripe,
+        collectedRevenue: finalCollectedCash,
         uncollectedRevenue: arBalance,
         payoutPaid: locShareCost - apBalance,
         payoutPayable: apBalance

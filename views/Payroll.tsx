@@ -20,6 +20,56 @@ import { supabase } from '../lib/supabase';
 import { Employee, PayrollRun, Payslip, Account } from '../types';
 import { useAccessControl } from '../lib/AccessControlContext';
 
+// Helper function to convert number to English words for payslip printouts
+function numberToWords(amount: number): string {
+  const sgls = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", 
+                "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+  const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+  const units = ["", "thousand", "million", "billion"];
+
+  if (amount === 0) return "zero dirhams only";
+
+  let parts = String(Math.floor(amount)).split("");
+  let words: string[] = [];
+
+  const parseThree = (chunk: string): string => {
+    let num = parseInt(chunk);
+    let str = "";
+    if (num >= 100) {
+      str += sgls[Math.floor(num / 100)] + " hundred ";
+      num %= 100;
+    }
+    if (num >= 20) {
+      str += tens[Math.floor(num / 10)] + " ";
+      if (num % 10 > 0) str += sgls[num % 10] + " ";
+    } else if (num > 0) {
+      str += sgls[num] + " ";
+    }
+    return str.trim();
+  };
+
+  // Split into thousands blocks
+  let blocks: string[] = [];
+  while (parts.length > 0) {
+    blocks.push(parts.splice(-3).join(""));
+  }
+  blocks = blocks.reverse();
+
+  for (let i = 0; i < blocks.length; i++) {
+    let blockVal = parseInt(blocks[i]);
+    if (blockVal > 0) {
+      let unitName = units[blocks.length - 1 - i];
+      words.push(parseThree(blocks[i]) + (unitName ? " " + unitName : ""));
+    }
+  }
+
+  let wholeWords = words.join(" ").trim();
+  let cents = Math.round((amount % 1) * 100);
+  let centsWord = cents > 0 ? ` and ${cents}/100` : "";
+
+  return (wholeWords + centsWord + " AED ONLY").toUpperCase();
+}
+
 const Payroll: React.FC = () => {
   const { hasFeature } = useAccessControl();
   const [payrollRuns, setPayrollRuns] = useState<PayrollRun[]>([]);
@@ -34,12 +84,13 @@ const Payroll: React.FC = () => {
   const [showModal, setShowModal] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState('');
   const [selectedYear, setSelectedYear] = useState('2026');
-  const [runDrafts, setRunDrafts] = useState<Record<string, { base: number, allowances: number, deductions: number }>>({});
+  const [runDrafts, setRunDrafts] = useState<Record<string, { base: number, allowances: number, commission: number, deductions: number, advances: number }>>({});
 
   // View details modal states
   const [selectedRun, setSelectedRun] = useState<PayrollRun | null>(null);
   const [runPayslips, setRunPayslips] = useState<any[]>([]);
   const [loadingPayslips, setLoadingPayslips] = useState(false);
+  const [printingPayslip, setPrintingPayslip] = useState<any | null>(null);
 
   const monthOptions = [
     'January', 'February', 'March', 'April', 'May', 'June', 
@@ -84,13 +135,15 @@ const Payroll: React.FC = () => {
   };
 
   const handleOpenCreate = () => {
-    const defaultDrafts: Record<string, { base: number, allowances: number, deductions: number }> = {};
+    const defaultDrafts: Record<string, { base: number, allowances: number, commission: number, deductions: number, advances: number }> = {};
     employees.forEach(emp => {
       const totalAllowances = Object.values(emp.allowances || {}).reduce((a, b) => a + b, 0);
       defaultDrafts[emp.id] = {
         base: emp.base_salary,
         allowances: totalAllowances,
-        deductions: 0
+        commission: 0,
+        deductions: 0,
+        advances: 0
       };
     });
 
@@ -103,6 +156,17 @@ const Payroll: React.FC = () => {
     setShowModal(true);
   };
 
+  const handleCommissionChange = (empId: string, val: string) => {
+    const commission = parseFloat(val) || 0;
+    setRunDrafts(prev => ({
+      ...prev,
+      [empId]: {
+        ...prev[empId],
+        commission
+      }
+    }));
+  };
+
   const handleDeductionChange = (empId: string, val: string) => {
     const deductions = parseFloat(val) || 0;
     setRunDrafts(prev => ({
@@ -110,6 +174,17 @@ const Payroll: React.FC = () => {
       [empId]: {
         ...prev[empId],
         deductions
+      }
+    }));
+  };
+
+  const handleAdvanceChange = (empId: string, val: string) => {
+    const advances = parseFloat(val) || 0;
+    setRunDrafts(prev => ({
+      ...prev,
+      [empId]: {
+        ...prev[empId],
+        advances
       }
     }));
   };
@@ -137,24 +212,40 @@ const Payroll: React.FC = () => {
       return;
     }
 
+    // Validate negative net salary
+    for (const [empId, item] of Object.entries(runDrafts)) {
+      const gross = item.base + item.allowances + (item.commission || 0);
+      const net = gross - item.deductions - (item.advances || 0);
+      if (net < 0) {
+        const emp = employees.find(e => e.id === empId);
+        const empName = emp ? emp.full_name : 'Employee';
+        setError(`Payroll run contains a negative net salary for ${empName} (AED ${net.toFixed(2)}). Deductions and advances cannot exceed gross earnings.`);
+        setIsSubmitting(false);
+        return;
+      }
+    }
+
     try {
       let totalGross = 0;
       let totalDeductions = 0;
+      let totalAdvances = 0;
       let totalNet = 0;
 
       const payslipItems = Object.entries(runDrafts).map(([empId, item]) => {
-        const gross = item.base + item.allowances;
-        const net = gross - item.deductions;
+        const gross = item.base + item.allowances + (item.commission || 0);
+        const net = gross - item.deductions - (item.advances || 0);
         
         totalGross += gross;
         totalDeductions += item.deductions;
+        totalAdvances += (item.advances || 0);
         totalNet += net;
 
         return {
           employee_id: empId,
           base_salary: item.base,
-          allowances: item.allowances,
+          allowances: item.allowances + (item.commission || 0),
           deductions: item.deductions,
+          advances: item.advances || 0,
           net_salary: net,
           payment_method: 'Bank Transfer'
         };
@@ -168,6 +259,7 @@ const Payroll: React.FC = () => {
           status: 'draft',
           total_gross: totalGross,
           total_deductions: totalDeductions,
+          total_advances: totalAdvances,
           total_net: totalNet
         })
         .select().single();
@@ -242,11 +334,34 @@ const Payroll: React.FC = () => {
         throw new Error('This payroll run is already approved/posted.');
       }
 
+      // Fetch payslips to calculate total commissions
+      const { data: slips, error: slipsErr } = await supabase
+        .from('payslips')
+        .select(`
+          *,
+          employees (
+            allowances
+          )
+        `)
+        .eq('payroll_run_id', runId);
+
+      if (slipsErr) throw slipsErr;
+
+          let totalCommission = 0;
+      (slips || []).forEach((slip: any) => {
+        const fixedAllowancesObj = slip.employees?.allowances || {};
+        const totalFixedAllowances = Object.values(fixedAllowancesObj).reduce((acc: number, val: any) => acc + (parseFloat(val) || 0), 0) as number;
+        const slipAllowances = parseFloat(slip.allowances) || 0;
+        const commission = Math.max(0, slipAllowances - totalFixedAllowances);
+        totalCommission += commission;
+      });
+
       // Resolve general ledger accounts by code
       const accountIdMap = new Map<string, string>(accounts.map(a => [a.code, a.id]));
       const expenseId = accountIdMap.get('5000'); // Salaries & Wages Expense
       const liabilityId = accountIdMap.get('2300'); // Payroll Payable
       const withholdId = accountIdMap.get('2400'); // Tax/Social Security Withholdings
+      const advanceId = accountIdMap.get('1200') || accountIdMap.get('1300'); // Employee Advances or Prepaid Expenses
 
       if (!expenseId || !liabilityId || !withholdId) {
         throw new Error('General ledger configuration accounts (5000, 2300, 2400) not found. Please verify Chart of Accounts migration.');
@@ -269,15 +384,15 @@ const Payroll: React.FC = () => {
       if (jeErr) throw jeErr;
 
       // 3. Create double-entry lines
-      // Debit Salaries Expense: Gross Salary
-      // Credit Payroll Payable: Net Salary
-      // Credit Withholdings: Deductions
+      const grossNum = parseFloat(run.total_gross) || 0;
+      const netNum = parseFloat(run.total_net) || 0;
+
       const journalItems = [
         {
           journal_entry_id: newJE.id,
           account_id: expenseId,
           description: `Gross Wages & Salaries for ${run.payroll_month}`,
-          debit: run.total_gross,
+          debit: grossNum - totalCommission,
           credit: 0,
           linked_payroll_run_id: run.id
         },
@@ -286,10 +401,31 @@ const Payroll: React.FC = () => {
           account_id: liabilityId,
           description: `Net salaries payable to employees for ${run.payroll_month}`,
           debit: 0,
-          credit: run.total_net,
+          credit: netNum - totalCommission,
           linked_payroll_run_id: run.id
         }
       ];
+
+      if (totalCommission > 0) {
+        journalItems.push(
+          {
+            journal_entry_id: newJE.id,
+            account_id: expenseId,
+            description: `Sales Commissions for ${run.payroll_month}`,
+            debit: totalCommission,
+            credit: 0,
+            linked_payroll_run_id: run.id
+          },
+          {
+            journal_entry_id: newJE.id,
+            account_id: liabilityId,
+            description: `Sales commissions payable to employees for ${run.payroll_month}`,
+            debit: 0,
+            credit: totalCommission,
+            linked_payroll_run_id: run.id
+          }
+        );
+      }
 
       // Add deduction withholdings line if deductions exist
       if (run.total_deductions > 0) {
@@ -299,6 +435,18 @@ const Payroll: React.FC = () => {
           description: `Payroll deductions & withholdings for ${run.payroll_month}`,
           debit: 0,
           credit: run.total_deductions,
+          linked_payroll_run_id: run.id
+        });
+      }
+
+      // Add advances clearing line if advances exist
+      if (run.total_advances > 0 && advanceId) {
+        journalItems.push({
+          journal_entry_id: newJE.id,
+          account_id: advanceId,
+          description: `Clear employee advances for ${run.payroll_month}`,
+          debit: 0,
+          credit: run.total_advances,
           linked_payroll_run_id: run.id
         });
       }
@@ -328,6 +476,13 @@ const Payroll: React.FC = () => {
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handlePrintPayslip = (payslip: any) => {
+    setPrintingPayslip(payslip);
+    setTimeout(() => {
+      window.print();
+    }, 300);
   };
 
   return (
@@ -399,7 +554,7 @@ const Payroll: React.FC = () => {
                           ? 'bg-emerald-100 text-emerald-800' 
                           : 'bg-amber-100 text-amber-800'
                       }`}>
-                        {run.status === 'approved' ? 'GL Posted' : 'Draft'}
+                        {run.status === 'approved' ? '✅ Paid & Posted' : 'Awaiting Approval'}
                       </span>
                     </div>
                     <div className="text-xs text-gray-500 font-semibold">
@@ -446,7 +601,7 @@ const Payroll: React.FC = () => {
                     className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-4 rounded-xl shadow-lg shadow-emerald-500/20 transition duration-150 text-sm flex items-center justify-center space-x-2"
                   >
                     {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
-                    <span>Approve & Post GL Entries</span>
+                    <span>Approve & Pay</span>
                   </button>
                 )}
 
@@ -464,10 +619,21 @@ const Payroll: React.FC = () => {
                           <div>
                             <p className="text-xs font-bold text-gray-900">{ps.employees?.full_name}</p>
                             <p className="text-[10px] text-gray-400 capitalize font-bold">{ps.employees?.role}</p>
+                            {ps.advances > 0 && (
+                              <p className="text-[9px] text-orange-500 font-bold">Advance: {ps.advances.toLocaleString()} AED</p>
+                            )}
                           </div>
-                          <div className="text-right">
-                            <p className="text-xs font-black text-gray-900">{ps.net_salary.toLocaleString()} AED</p>
-                            <span className="text-[9px] text-gray-400 font-mono">{ps.employees?.bank_name}</span>
+                          <div className="flex items-center space-x-2.5">
+                            <div className="text-right">
+                              <p className="text-xs font-black text-gray-900">{ps.net_salary.toLocaleString()} AED</p>
+                              <span className="text-[9px] text-gray-400 font-mono">{ps.employees?.bank_name}</span>
+                            </div>
+                            <button
+                              onClick={() => handlePrintPayslip(ps)}
+                              className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+                            >
+                              <Printer size={14} />
+                            </button>
                           </div>
                         </div>
                       ))}
@@ -536,15 +702,17 @@ const Payroll: React.FC = () => {
                       <tr>
                         <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Employee</th>
                         <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Base Salary</th>
-                        <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Allowances</th>
+                        <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Fixed Allow.</th>
+                        <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Sales Comm. (AED)</th>
                         <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Deductions (AED)</th>
+                        <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Advances (AED)</th>
                         <th className="px-4 py-3 text-right text-[10px] font-black text-gray-400 uppercase tracking-widest">Net Salary</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200 bg-white">
                       {employees.map(emp => {
-                        const item = runDrafts[emp.id] || { base: 0, allowances: 0, deductions: 0 };
-                        const net = item.base + item.allowances - item.deductions;
+                        const item = runDrafts[emp.id] || { base: 0, allowances: 0, commission: 0, deductions: 0, advances: 0 };
+                        const net = item.base + item.allowances + (item.commission || 0) - item.deductions - (item.advances || 0);
                         
                         return (
                           <tr key={emp.id} className="hover:bg-gray-50/50">
@@ -571,8 +739,30 @@ const Payroll: React.FC = () => {
                                 min="0"
                                 step="0.01"
                                 placeholder="0.00"
+                                value={item.commission || ''}
+                                onChange={(e) => handleCommissionChange(emp.id, e.target.value)}
+                                className="w-24 border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 font-bold"
+                              />
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                placeholder="0.00"
                                 value={item.deductions || ''}
                                 onChange={(e) => handleDeductionChange(emp.id, e.target.value)}
+                                className="w-24 border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 font-bold"
+                              />
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                placeholder="0.00"
+                                value={item.advances || ''}
+                                onChange={(e) => handleAdvanceChange(emp.id, e.target.value)}
                                 className="w-24 border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 font-bold"
                               />
                             </td>
@@ -592,7 +782,7 @@ const Payroll: React.FC = () => {
                 <div className="text-sm font-semibold text-gray-500">
                   Total gross estimation:{' '}
                   <span className="font-black text-gray-900">
-                    {Object.values(runDrafts).reduce((a, b) => a + b.base + b.allowances, 0).toLocaleString()} AED
+                    {Object.values(runDrafts).reduce((a, b) => a + b.base + b.allowances + (b.commission || 0), 0).toLocaleString()} AED
                   </span>
                 </div>
                 <div className="flex space-x-3">
@@ -609,11 +799,109 @@ const Payroll: React.FC = () => {
                     className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold shadow-lg shadow-blue-500/20 flex items-center space-x-2"
                   >
                     {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
-                    <span>Confirm Draft</span>
+                    <span>Save Payroll Run</span>
                   </button>
                 </div>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Printable Payslip */}
+      {printingPayslip && (
+        <div className="hidden print:block print:p-8 bg-white text-gray-900 min-h-screen text-sm leading-normal">
+          <style>{`
+            @media print {
+              body * {
+                visibility: hidden;
+              }
+              #payslip-print-section, #payslip-print-section * {
+                visibility: visible;
+              }
+              #payslip-print-section {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+              }
+            }
+          `}</style>
+          
+          <div id="payslip-print-section" className="space-y-6 border border-gray-300 p-8 rounded-xl bg-white max-w-xl mx-auto">
+            {/* Header */}
+            <div className="flex justify-between items-start border-b border-gray-200 pb-4">
+              <div>
+                <h1 className="text-lg font-black tracking-tight">PowerPod Technologies LLC</h1>
+                <p className="text-[10px] text-gray-500 font-semibold mt-0.5">Dubai, United Arab Emirates</p>
+              </div>
+              <div className="text-right">
+                <h2 className="text-sm font-black uppercase text-gray-800 tracking-wider">Payslip Voucher</h2>
+                <p className="text-xs font-bold text-gray-600 mt-0.5">Period: {selectedRun?.payroll_month}</p>
+              </div>
+            </div>
+
+            {/* Employee details */}
+            <div className="grid grid-cols-2 gap-y-4 text-xs py-2 border-b border-gray-100">
+              <div>
+                <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Employee Name</p>
+                <p className="font-black text-gray-800 mt-0.5">{printingPayslip.employees?.full_name}</p>
+              </div>
+              <div>
+                <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Role / Designation</p>
+                <p className="font-semibold text-gray-800 mt-0.5 capitalize">{printingPayslip.employees?.role}</p>
+              </div>
+              <div>
+                <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Bank details</p>
+                <p className="font-mono text-gray-600 mt-0.5">{printingPayslip.employees?.bank_name} - {printingPayslip.employees?.bank_account_number}</p>
+              </div>
+              <div>
+                <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">IBAN</p>
+                <p className="font-mono text-gray-600 mt-0.5">{printingPayslip.employees?.iban}</p>
+              </div>
+            </div>
+
+            {/* Earnings and deductions table */}
+            <div className="space-y-2.5">
+              <div className="flex justify-between text-xs font-semibold text-gray-500">
+                <span>Base Salary:</span>
+                <span className="font-bold text-gray-900">{printingPayslip.base_salary.toLocaleString()} AED</span>
+              </div>
+              <div className="flex justify-between text-xs font-semibold text-gray-500">
+                <span>Allowances:</span>
+                <span className="font-bold text-gray-900">{printingPayslip.allowances.toLocaleString()} AED</span>
+              </div>
+              <div className="flex justify-between text-xs font-semibold text-gray-500">
+                <span>Deductions:</span>
+                <span className="font-bold text-red-600">-{printingPayslip.deductions.toLocaleString()} AED</span>
+              </div>
+              {printingPayslip.advances > 0 && (
+                <div className="flex justify-between text-xs font-semibold text-gray-500">
+                  <span>Salary Advances:</span>
+                  <span className="font-bold text-orange-600">-{printingPayslip.advances.toLocaleString()} AED</span>
+                </div>
+              )}
+              <div className="border-t border-gray-200 pt-2.5 flex justify-between text-sm font-black text-gray-900">
+                <span>Net Salary Paid:</span>
+                <span>{printingPayslip.net_salary.toLocaleString()} AED</span>
+              </div>
+            </div>
+
+            {/* Amount in words */}
+            <div className="p-3 bg-gray-50 border border-gray-100 rounded-lg text-[10px] font-black text-gray-600 uppercase italic tracking-wider">
+              {numberToWords(printingPayslip.net_salary)}
+            </div>
+
+            {/* Footer signatures */}
+            <div className="grid grid-cols-2 gap-8 pt-8 text-center text-[10px]">
+              <div className="space-y-8">
+                <div className="border-b border-gray-200 w-full" />
+                <p className="font-black text-gray-500 uppercase">Authorized Signature</p>
+              </div>
+              <div className="space-y-8">
+                <div className="border-b border-gray-200 w-full" />
+                <p className="font-black text-gray-500 uppercase">Employee Signature</p>
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -15,7 +15,12 @@ import {
   ShieldCheck,
   UserCheck,
   Banknote,
-  BookOpen
+  BookOpen,
+  HelpCircle,
+  Wallet,
+  Building2,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import Dashboard from './views/Dashboard';
 import Merchants from './views/Merchants';
@@ -29,6 +34,9 @@ import UpdatePassword from './views/UpdatePassword';
 import EmployeeManagement from './views/EmployeeManagement';
 import Payroll from './views/Payroll';
 import Ledger from './views/Ledger';
+import AccountingHelp from './views/AccountingHelp';
+import FinanceHub from './views/FinanceHub';
+import CompanySettings from './views/CompanySettings';
 import { supabase } from './lib/supabase';
 import { SyncProvider, useSync } from './lib/SyncContext';
 import { FeatureKey, Profile, View } from './types';
@@ -41,6 +49,7 @@ const AppContent: React.FC = () => {
   const [isPasswordRecovery, setIsPasswordRecovery] = useState<boolean>(false);
   const [currentView, setCurrentView] = useState<View>('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
+  const [isFinanceOpen, setIsFinanceOpen] = useState<boolean>(true);
   const [userProfile, setUserProfile] = useState<Profile | null>(null);
   const { isSyncing, status, error, progress } = useSync();
   const features = userProfile ? resolveFeatureFlags(userProfile.role, userProfile.feature_flags ?? null) : null;
@@ -69,6 +78,12 @@ const AppContent: React.FC = () => {
         return can('nav.payroll');
       case 'ledger':
         return can('nav.ledger');
+      case 'accounting-help':
+        return can('nav.accounting-help');
+      case 'finance-hub':
+        return can('nav.finance-hub');
+      case 'company-settings':
+        return can('nav.company-settings');
       default:
         return false;
     }
@@ -135,7 +150,7 @@ const AppContent: React.FC = () => {
     if (!features) return;
     if (canView(currentView)) return;
 
-    const orderedViews: View[] = ['dashboard', 'merchants', 'assets', 'processor', 'reports', 'users', 'settings', 'employees', 'payroll', 'ledger'];
+    const orderedViews: View[] = ['dashboard', 'merchants', 'assets', 'processor', 'reports', 'users', 'settings', 'employees', 'payroll', 'ledger', 'accounting-help', 'finance-hub', 'company-settings'];
     const next = orderedViews.find(v => canView(v));
     if (next) setCurrentView(next);
   }, [isAuthenticated, features, currentView]);
@@ -212,11 +227,95 @@ const AppContent: React.FC = () => {
             {can('nav.employees') && (
               <NavigationItem icon={UserCheck} label="Employees" id="employees" active={currentView === 'employees'} />
             )}
-            {can('nav.payroll') && (
-              <NavigationItem icon={Banknote} label="Payroll" id="payroll" active={currentView === 'payroll'} />
-            )}
-            {can('nav.ledger') && (
-              <NavigationItem icon={BookOpen} label="General Ledger" id="ledger" active={currentView === 'ledger'} />
+            {/* Financial Hub Nested Menu */}
+            {(can('nav.finance-hub') || can('nav.payroll') || can('nav.ledger') || can('nav.company-settings') || can('nav.accounting-help')) && (
+              <div className="space-y-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!isSidebarOpen) {
+                      setIsSidebarOpen(true);
+                      setIsFinanceOpen(true);
+                      setCurrentView('finance-hub');
+                    } else {
+                      setIsFinanceOpen(!isFinanceOpen);
+                    }
+                  }}
+                  className={`w-full flex items-center justify-between px-4 py-3 rounded-lg transition-all duration-150 ${
+                    (currentView === 'finance-hub' || currentView === 'payroll' || currentView === 'ledger' || currentView === 'company-settings' || currentView === 'accounting-help')
+                      ? 'bg-gray-800 text-white'
+                      : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center space-x-3">
+                    <Wallet size={20} className={(currentView === 'finance-hub' || currentView === 'payroll' || currentView === 'ledger' || currentView === 'company-settings' || currentView === 'accounting-help') ? 'text-blue-500' : ''} />
+                    <span className={`font-semibold text-sm ${!isSidebarOpen && 'hidden'}`}>Financial Hub</span>
+                  </div>
+                  {isSidebarOpen && (
+                    isFinanceOpen ? <ChevronUp size={14} className="text-gray-500" /> : <ChevronDown size={14} className="text-gray-500" />
+                  )}
+                </button>
+                
+                {isFinanceOpen && isSidebarOpen && (
+                  <div className="pl-4 space-y-1 border-l border-gray-800 ml-6 mt-1">
+                    {can('nav.finance-hub') && (
+                      <button
+                        type="button"
+                        onClick={() => setCurrentView('finance-hub')}
+                        className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                          currentView === 'finance-hub' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+                        }`}
+                      >
+                        Overview & Postings
+                      </button>
+                    )}
+                    {can('nav.payroll') && (
+                      <button
+                        type="button"
+                        onClick={() => setCurrentView('payroll')}
+                        className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                          currentView === 'payroll' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+                        }`}
+                      >
+                        Payroll Register
+                      </button>
+                    )}
+                    {can('nav.ledger') && (
+                      <button
+                        type="button"
+                        onClick={() => setCurrentView('ledger')}
+                        className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                          currentView === 'ledger' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+                        }`}
+                      >
+                        General Ledger
+                      </button>
+                    )}
+                    {can('nav.company-settings') && (
+                      <button
+                        type="button"
+                        onClick={() => setCurrentView('company-settings')}
+                        className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                          currentView === 'company-settings' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+                        }`}
+                      >
+                        Company Settings
+                      </button>
+                    )}
+                    {can('nav.accounting-help') && (
+                      <button
+                        type="button"
+                        onClick={() => setCurrentView('accounting-help')}
+                        className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                          currentView === 'accounting-help' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+                        }`}
+                      >
+                        Accounting Help
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
             {can('nav.settings') && (
               <NavigationItem icon={SettingsIcon} label="Protocol Config" id="settings" active={currentView === 'settings'} />
@@ -282,6 +381,9 @@ const AppContent: React.FC = () => {
             {currentView === 'employees' && <EmployeeManagement />}
             {currentView === 'payroll' && <Payroll />}
             {currentView === 'ledger' && <Ledger />}
+            {currentView === 'accounting-help' && <AccountingHelp />}
+            {currentView === 'finance-hub' && <FinanceHub />}
+            {currentView === 'company-settings' && <CompanySettings />}
           </div>
         </main>
       </div>

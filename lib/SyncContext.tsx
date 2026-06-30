@@ -113,6 +113,12 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         if (reportErr) throw reportErr;
 
         // 3. Iterate through each Merchant in this Period
+        let monthlySales = 0;
+        let monthlyFees = 0;
+        let monthlyTax = 0;
+        let monthlyPayable = 0;
+        const summariesCreated: any[] = [];
+
         for (const [mName, data] of merchants.entries()) {
           opCount++;
           setState(s => ({ ...s, status: `Syncing ${mName} (${month})`, progress: `${Math.round((opCount / totalOperations) * 100)}%` }));
@@ -167,6 +173,12 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             payable = netSales * (sharePercentage / 100);
           }
 
+          // Accumulate for consolidated JV
+          monthlySales += totalSales;
+          monthlyFees += stripeFees;
+          monthlyTax += taxAmount;
+          monthlyPayable += payable;
+
           // Upsert Merchant Period Summary
           const { data: summary, error: sErr } = await supabase
             .from('merchant_period_summaries')
@@ -184,127 +196,144 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             .select().single();
 
           if (!sErr && summary) {
-            // Clean up existing transactions and journal entries for this summary to avoid duplicates on re-upload
+            // Clean up existing transactions and legacy per-merchant JVs
             await supabase.from('sales_transactions').delete().eq('summary_id', summary.id);
 
-            const refNum = `GL-${summary.id}`;
+            const legacyRefNum = `GL-${summary.id}`;
             const { data: existingJE } = await supabase
               .from('journal_entries')
               .select('id')
-              .eq('reference_number', refNum)
+              .eq('reference_number', legacyRefNum)
               .maybeSingle();
 
             if (existingJE) {
+              await supabase.from('journal_items').delete().eq('journal_entry_id', existingJE.id);
               await supabase.from('journal_entries').delete().eq('id', existingJE.id);
             }
 
-            // Create a Journal Entry Header
-            const { data: newJE, error: jeErr } = await supabase
-              .from('journal_entries')
-              .insert({
-                entry_date: getLastDayOfMonth(month),
-                reference_number: refNum,
-                description: `General Ledger reconciliation for ${mName} - ${month}`,
-                status: 'posted'
-              })
-              .select().single();
+            summariesCreated.push({ summary, rows: data.rows });
+          }
+        }
 
-            if (!jeErr && newJE) {
-              const arId = accountIdMap.get('1100');
-              const revId = accountIdMap.get('4000');
-              const vatId = accountIdMap.get('2200');
-              const bankId = accountIdMap.get('1010');
-              const feeId = accountIdMap.get('5200');
-              const locCostId = accountIdMap.get('5100');
-              const locPayId = accountIdMap.get('2100');
+        // 4. Create single consolidated monthly Journal Entry
+        const monthlyRef = `GL-MONTH-${reportData.id}`;
+        const { data: existingMonthlyJE } = await supabase
+          .from('journal_entries')
+          .select('id')
+          .eq('reference_number', monthlyRef)
+          .maybeSingle();
 
-              if (arId && revId && vatId && bankId && feeId && locCostId && locPayId) {
-                const journalItems = [
-                  // 1. Rental Accrual (Excluding VAT and including VAT liability)
-                  {
-                    journal_entry_id: newJE.id,
-                    account_id: arId,
-                    description: `Rental Accounts Receivable accrual for ${mName} - ${month}`,
-                    debit: totalSales,
-                    credit: 0
-                  },
-                  {
-                    journal_entry_id: newJE.id,
-                    account_id: revId,
-                    description: `Rental revenue for ${mName} - ${month}`,
-                    debit: 0,
-                    credit: totalSales - taxAmount
-                  },
-                  {
-                    journal_entry_id: newJE.id,
-                    account_id: vatId,
-                    description: `VAT (5%) output tax for ${mName} - ${month}`,
-                    debit: 0,
-                    credit: taxAmount
-                  },
-                  // 2. Stripe Collection
-                  {
-                    journal_entry_id: newJE.id,
-                    account_id: bankId,
-                    description: `Cash collection via Stripe for ${mName} - ${month}`,
-                    debit: totalSales - stripeFees,
-                    credit: 0
-                  },
-                  {
-                    journal_entry_id: newJE.id,
-                    account_id: feeId,
-                    description: `Stripe processing fees for ${mName} - ${month}`,
-                    debit: stripeFees,
-                    credit: 0
-                  },
-                  {
-                    journal_entry_id: newJE.id,
-                    account_id: arId,
-                    description: `Clear Accounts Receivable upon Stripe collection for ${mName} - ${month}`,
-                    debit: 0,
-                    credit: totalSales
-                  },
-                  // 3. Location Share Accrual
-                  {
-                    journal_entry_id: newJE.id,
-                    account_id: locCostId,
-                    description: `Location revenue share cost for ${mName} - ${month}`,
-                    debit: payable,
-                    credit: 0
-                  },
-                  {
-                    journal_entry_id: newJE.id,
-                    account_id: locPayId,
-                    description: `Accounts payable to location for ${mName} - ${month}`,
-                    debit: 0,
-                    credit: payable
-                  }
-                ];
+        if (existingMonthlyJE) {
+          await supabase.from('journal_items').delete().eq('journal_entry_id', existingMonthlyJE.id);
+          await supabase.from('journal_entries').delete().eq('id', existingMonthlyJE.id);
+        }
 
-                await supabase.from('journal_items').insert(journalItems);
+        const { data: monthlyJE, error: monthlyJeErr } = await supabase
+          .from('journal_entries')
+          .insert({
+            entry_date: getLastDayOfMonth(month),
+            reference_number: monthlyRef,
+            description: `Consolidated Monthly Revenue & Share Allocation - ${month}`,
+            status: 'posted'
+          })
+          .select().single();
+
+        if (!monthlyJeErr && monthlyJE) {
+          const arId = accountIdMap.get('1100');
+          const revId = accountIdMap.get('4000');
+          const vatId = accountIdMap.get('2200');
+          const bankId = accountIdMap.get('1010');
+          const feeId = accountIdMap.get('5200');
+          const locCostId = accountIdMap.get('5100');
+          const locPayId = accountIdMap.get('2100');
+
+          if (arId && revId && vatId && bankId && feeId && locCostId && locPayId) {
+            const consolidatedItems = [
+              // 1. Rental Accrual
+              {
+                journal_entry_id: monthlyJE.id,
+                account_id: arId,
+                description: `Consolidated Accounts Receivable accrual - ${month}`,
+                debit: monthlySales,
+                credit: 0
+              },
+              {
+                journal_entry_id: monthlyJE.id,
+                account_id: revId,
+                description: `Consolidated rental revenue - ${month}`,
+                debit: 0,
+                credit: monthlySales - monthlyTax
+              },
+              {
+                journal_entry_id: monthlyJE.id,
+                account_id: vatId,
+                description: `Consolidated VAT (5%) output tax - ${month}`,
+                debit: 0,
+                credit: monthlyTax
+              },
+              // 2. Stripe Collection
+              {
+                journal_entry_id: monthlyJE.id,
+                account_id: bankId,
+                description: `Consolidated cash collection via Stripe - ${month}`,
+                debit: monthlySales - monthlyFees,
+                credit: 0
+              },
+              {
+                journal_entry_id: monthlyJE.id,
+                account_id: feeId,
+                description: `Consolidated Stripe processing fees - ${month}`,
+                debit: monthlyFees,
+                credit: 0
+              },
+              {
+                journal_entry_id: monthlyJE.id,
+                account_id: arId,
+                description: `Consolidated clear Accounts Receivable - ${month}`,
+                debit: 0,
+                credit: monthlySales
+              },
+              // 3. Location Share Accrual
+              {
+                journal_entry_id: monthlyJE.id,
+                account_id: locCostId,
+                description: `Consolidated location revenue share cost - ${month}`,
+                debit: monthlyPayable,
+                credit: 0
+              },
+              {
+                journal_entry_id: monthlyJE.id,
+                account_id: locPayId,
+                description: `Consolidated accounts payable to location - ${month}`,
+                debit: 0,
+                credit: monthlyPayable
               }
-            }
+            ];
 
-            const txs = data.rows.map((r: any) => {
-              const rowSales = r['_rawAmount'] || 0;
-              const rowStripe = r['Stripe Fees'] || 0;
-              return {
-                summary_id: summary.id,
-                order_id: String(r['Order ID'] || r['Order No'] || ''),
-                amount: rowSales,
-                stripe_fee: rowStripe,
-                tax_fee: rowSales * 0.05,
-                transaction_date: String(r['_rawDate'] || ''),
-                venue_name: String(r['_normalizedVenue']),
-                station_name: String(r['_normalizedStation'] || r['Station Name'] || 'Unknown')
-              };
-            });
-            
-            // Batch insertion for performance
-            const batchSize = 100;
-            for (let i = 0; i < txs.length; i += batchSize) {
-              await supabase.from('sales_transactions').insert(txs.slice(i, i + batchSize));
-            }
+            await supabase.from('journal_items').insert(consolidatedItems);
+          }
+        }
+
+        // 5. Insert transactions
+        for (const item of summariesCreated) {
+          const txs = item.rows.map((r: any) => {
+            const rowSales = r['_rawAmount'] || 0;
+            const rowStripe = r['Stripe Fees'] || 0;
+            return {
+              summary_id: item.summary.id,
+              order_id: String(r['Order ID'] || r['Order No'] || ''),
+              amount: rowSales,
+              stripe_fee: rowStripe,
+              tax_fee: rowSales * 0.05,
+              transaction_date: String(r['_rawDate'] || ''),
+              venue_name: String(r['_normalizedVenue']),
+              station_name: String(r['_normalizedStation'] || r['Station Name'] || 'Unknown')
+            };
+          });
+
+          const batchSize = 100;
+          for (let i = 0; i < txs.length; i += batchSize) {
+            await supabase.from('sales_transactions').insert(txs.slice(i, i + batchSize));
           }
         }
       }
