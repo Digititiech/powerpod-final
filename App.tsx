@@ -12,7 +12,10 @@ import {
   X,
   RefreshCw,
   AlertCircle,
-  ShieldCheck
+  ShieldCheck,
+  UserCheck,
+  Banknote,
+  BookOpen
 } from 'lucide-react';
 import Dashboard from './views/Dashboard';
 import Merchants from './views/Merchants';
@@ -23,6 +26,9 @@ import UserManagement from './views/UserManagement';
 import Settings from './views/Settings';
 import Login from './views/Login';
 import UpdatePassword from './views/UpdatePassword';
+import EmployeeManagement from './views/EmployeeManagement';
+import Payroll from './views/Payroll';
+import Ledger from './views/Ledger';
 import { supabase } from './lib/supabase';
 import { SyncProvider, useSync } from './lib/SyncContext';
 import { FeatureKey, Profile, View } from './types';
@@ -57,6 +63,12 @@ const AppContent: React.FC = () => {
         return can('nav.identity') && can('identity.view');
       case 'settings':
         return can('nav.settings');
+      case 'employees':
+        return can('nav.employees');
+      case 'payroll':
+        return can('nav.payroll');
+      case 'ledger':
+        return can('nav.ledger');
       default:
         return false;
     }
@@ -123,7 +135,7 @@ const AppContent: React.FC = () => {
     if (!features) return;
     if (canView(currentView)) return;
 
-    const orderedViews: View[] = ['dashboard', 'merchants', 'assets', 'processor', 'reports', 'users', 'settings'];
+    const orderedViews: View[] = ['dashboard', 'merchants', 'assets', 'processor', 'reports', 'users', 'settings', 'employees', 'payroll', 'ledger'];
     const next = orderedViews.find(v => canView(v));
     if (next) setCurrentView(next);
   }, [isAuthenticated, features, currentView]);
@@ -178,7 +190,7 @@ const AppContent: React.FC = () => {
             </button>
           </div>
 
-          <nav className="flex-1 px-4 space-y-2 mt-4">
+          <nav className="flex-1 px-4 space-y-2 mt-4 overflow-y-auto no-scrollbar">
             {can('nav.dashboard') && (
               <NavigationItem icon={LayoutDashboard} label="Dashboard" id="dashboard" active={currentView === 'dashboard'} />
             )}
@@ -196,6 +208,15 @@ const AppContent: React.FC = () => {
             )}
             {can('nav.identity') && can('identity.view') && (
               <NavigationItem icon={ShieldCheck} label="Identity" id="users" active={currentView === 'users'} />
+            )}
+            {can('nav.employees') && (
+              <NavigationItem icon={UserCheck} label="Employees" id="employees" active={currentView === 'employees'} />
+            )}
+            {can('nav.payroll') && (
+              <NavigationItem icon={Banknote} label="Payroll" id="payroll" active={currentView === 'payroll'} />
+            )}
+            {can('nav.ledger') && (
+              <NavigationItem icon={BookOpen} label="General Ledger" id="ledger" active={currentView === 'ledger'} />
             )}
             {can('nav.settings') && (
               <NavigationItem icon={SettingsIcon} label="Protocol Config" id="settings" active={currentView === 'settings'} />
@@ -258,6 +279,9 @@ const AppContent: React.FC = () => {
             {currentView === 'reports' && <MonthlyReports />}
             {currentView === 'users' && <UserManagement />}
             {currentView === 'settings' && <Settings />}
+            {currentView === 'employees' && <EmployeeManagement />}
+            {currentView === 'payroll' && <Payroll />}
+            {currentView === 'ledger' && <Ledger />}
           </div>
         </main>
       </div>

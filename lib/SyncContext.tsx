@@ -2,6 +2,22 @@
 import React, { createContext, useContext, useState, ReactNode } from 'react';
 import { supabase } from './supabase';
 
+const getLastDayOfMonth = (monthYearStr: string): string => {
+  try {
+    const parts = monthYearStr.trim().split(/\s+/);
+    if (parts.length < 2) return new Date().toISOString().split('T')[0];
+    const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const monthIdx = monthNames.indexOf(parts[0].toLowerCase().substring(0, 3));
+    if (monthIdx === -1) return new Date().toISOString().split('T')[0];
+    const year = parseInt(parts[1]);
+    if (isNaN(year)) return new Date().toISOString().split('T')[0];
+    const lastDay = new Date(year, monthIdx + 1, 0); // Last day of month
+    return lastDay.toISOString().split('T')[0];
+  } catch {
+    return new Date().toISOString().split('T')[0];
+  }
+};
+
 interface SyncState {
   isSyncing: boolean;
   status: string | null;
@@ -46,6 +62,11 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setState(s => ({ ...s, isSyncing: true, status: 'Initializing Multi-Period Sync', error: null }));
 
     try {
+      // Fetch Chart of Accounts mappings for general ledger entries
+      const { data: accountsData, error: accountsErr } = await supabase.from('accounts').select('id, code');
+      if (accountsErr) throw accountsErr;
+      const accountIdMap = new Map<string, string>(accountsData?.map(a => [a.code, a.id]) || []);
+
       // 1. Group data by [Report Month][Merchant]
       const periodMap = new Map<string, Map<string, { sales: number, fees: number, rows: any[] }>>();
       
@@ -118,11 +139,32 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           const taxAmount = totalSales * 0.05;
           const netSales = grossSales - taxAmount;
 
+          // Query active contract for the merchant covering this month-period
+          const periodLastDay = getLastDayOfMonth(month);
+          const { data: activeContract } = await supabase
+            .from('contracts')
+            .select('revenue_share_percentage, fixed_monthly_charge, contract_type')
+            .eq('merchant_id', merchant.id)
+            .lte('start_date', periodLastDay)
+            .gte('end_date', periodLastDay)
+            .eq('status', 'Active')
+            .maybeSingle();
+
+          let contractType = merchant.contract_type;
+          let sharePercentage = merchant.revenue_share_percentage;
+          
+          if (activeContract) {
+            contractType = activeContract.contract_type;
+            sharePercentage = contractType === 'Fixed Charge - Monthly' 
+              ? Number(activeContract.fixed_monthly_charge) || 0 
+              : Number(activeContract.revenue_share_percentage) || 0;
+          }
+
           let payable = 0;
-          if (merchant.contract_type === 'Fixed Charge - Monthly') {
-            payable = merchant.revenue_share_percentage;
+          if (contractType === 'Fixed Charge - Monthly') {
+            payable = sharePercentage;
           } else {
-            payable = netSales * (merchant.revenue_share_percentage / 100);
+            payable = netSales * (sharePercentage / 100);
           }
 
           // Upsert Merchant Period Summary
@@ -142,13 +184,110 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             .select().single();
 
           if (!sErr && summary) {
-            // Clean up existing transactions for this summary to avoid duplicates on re-upload
+            // Clean up existing transactions and journal entries for this summary to avoid duplicates on re-upload
             await supabase.from('sales_transactions').delete().eq('summary_id', summary.id);
+
+            const refNum = `GL-${summary.id}`;
+            const { data: existingJE } = await supabase
+              .from('journal_entries')
+              .select('id')
+              .eq('reference_number', refNum)
+              .maybeSingle();
+
+            if (existingJE) {
+              await supabase.from('journal_entries').delete().eq('id', existingJE.id);
+            }
+
+            // Create a Journal Entry Header
+            const { data: newJE, error: jeErr } = await supabase
+              .from('journal_entries')
+              .insert({
+                entry_date: getLastDayOfMonth(month),
+                reference_number: refNum,
+                description: `General Ledger reconciliation for ${mName} - ${month}`,
+                status: 'posted'
+              })
+              .select().single();
+
+            if (!jeErr && newJE) {
+              const arId = accountIdMap.get('1100');
+              const revId = accountIdMap.get('4000');
+              const vatId = accountIdMap.get('2200');
+              const bankId = accountIdMap.get('1010');
+              const feeId = accountIdMap.get('5200');
+              const locCostId = accountIdMap.get('5100');
+              const locPayId = accountIdMap.get('2100');
+
+              if (arId && revId && vatId && bankId && feeId && locCostId && locPayId) {
+                const journalItems = [
+                  // 1. Rental Accrual (Excluding VAT and including VAT liability)
+                  {
+                    journal_entry_id: newJE.id,
+                    account_id: arId,
+                    description: `Rental Accounts Receivable accrual for ${mName} - ${month}`,
+                    debit: totalSales,
+                    credit: 0
+                  },
+                  {
+                    journal_entry_id: newJE.id,
+                    account_id: revId,
+                    description: `Rental revenue for ${mName} - ${month}`,
+                    debit: 0,
+                    credit: totalSales - taxAmount
+                  },
+                  {
+                    journal_entry_id: newJE.id,
+                    account_id: vatId,
+                    description: `VAT (5%) output tax for ${mName} - ${month}`,
+                    debit: 0,
+                    credit: taxAmount
+                  },
+                  // 2. Stripe Collection
+                  {
+                    journal_entry_id: newJE.id,
+                    account_id: bankId,
+                    description: `Cash collection via Stripe for ${mName} - ${month}`,
+                    debit: totalSales - stripeFees,
+                    credit: 0
+                  },
+                  {
+                    journal_entry_id: newJE.id,
+                    account_id: feeId,
+                    description: `Stripe processing fees for ${mName} - ${month}`,
+                    debit: stripeFees,
+                    credit: 0
+                  },
+                  {
+                    journal_entry_id: newJE.id,
+                    account_id: arId,
+                    description: `Clear Accounts Receivable upon Stripe collection for ${mName} - ${month}`,
+                    debit: 0,
+                    credit: totalSales
+                  },
+                  // 3. Location Share Accrual
+                  {
+                    journal_entry_id: newJE.id,
+                    account_id: locCostId,
+                    description: `Location revenue share cost for ${mName} - ${month}`,
+                    debit: payable,
+                    credit: 0
+                  },
+                  {
+                    journal_entry_id: newJE.id,
+                    account_id: locPayId,
+                    description: `Accounts payable to location for ${mName} - ${month}`,
+                    debit: 0,
+                    credit: payable
+                  }
+                ];
+
+                await supabase.from('journal_items').insert(journalItems);
+              }
+            }
 
             const txs = data.rows.map((r: any) => {
               const rowSales = r['_rawAmount'] || 0;
               const rowStripe = r['Stripe Fees'] || 0;
-              const rowGross = rowSales - rowStripe;
               return {
                 summary_id: summary.id,
                 order_id: String(r['Order ID'] || r['Order No'] || ''),

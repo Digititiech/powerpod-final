@@ -77,6 +77,27 @@ export const FEATURE_DEFINITIONS: FeatureDefinition[] = [
     description: 'Show Protocol Config (Settings) in sidebar navigation.',
     defaultByRole: { admin: true, staff: false, technician: false },
   },
+  {
+    key: 'nav.employees',
+    label: 'Employees (Navigation)',
+    category: 'Navigation',
+    description: 'Show Employees in sidebar navigation.',
+    defaultByRole: { admin: true, staff: true, technician: false },
+  },
+  {
+    key: 'nav.payroll',
+    label: 'Payroll (Navigation)',
+    category: 'Navigation',
+    description: 'Show Payroll in sidebar navigation.',
+    defaultByRole: { admin: true, staff: false, technician: false },
+  },
+  {
+    key: 'nav.ledger',
+    label: 'Ledger (Navigation)',
+    category: 'Navigation',
+    description: 'Show General Ledger in sidebar navigation.',
+    defaultByRole: { admin: true, staff: false, technician: false },
+  },
 
   {
     key: 'dashboard.transactions.view',

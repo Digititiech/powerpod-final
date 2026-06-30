@@ -1,0 +1,624 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  FileText, 
+  Calendar, 
+  Plus, 
+  DollarSign, 
+  Check, 
+  AlertCircle, 
+  Loader2, 
+  Building2, 
+  ShieldCheck, 
+  Printer, 
+  ArrowRight,
+  TrendingUp,
+  X,
+  CreditCard,
+  User
+} from 'lucide-react';
+import { supabase } from '../lib/supabase';
+import { Employee, PayrollRun, Payslip, Account } from '../types';
+import { useAccessControl } from '../lib/AccessControlContext';
+
+const Payroll: React.FC = () => {
+  const { hasFeature } = useAccessControl();
+  const [payrollRuns, setPayrollRuns] = useState<PayrollRun[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  // Run creation form states
+  const [showModal, setShowModal] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState('');
+  const [selectedYear, setSelectedYear] = useState('2026');
+  const [runDrafts, setRunDrafts] = useState<Record<string, { base: number, allowances: number, deductions: number }>>({});
+
+  // View details modal states
+  const [selectedRun, setSelectedRun] = useState<PayrollRun | null>(null);
+  const [runPayslips, setRunPayslips] = useState<any[]>([]);
+  const [loadingPayslips, setLoadingPayslips] = useState(false);
+
+  const monthOptions = [
+    'January', 'February', 'March', 'April', 'May', 'June', 
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  const fetchData = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const { data: runs, error: runsErr } = await supabase
+        .from('payroll_runs')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (runsErr) throw runsErr;
+      setPayrollRuns(runs || []);
+
+      const { data: emps, error: empsErr } = await supabase
+        .from('employees')
+        .select('*')
+        .eq('status', 'active');
+
+      if (empsErr) throw empsErr;
+      setEmployees(emps || []);
+
+      const { data: accs, error: accsErr } = await supabase
+        .from('accounts')
+        .select('*');
+      if (accsErr) throw accsErr;
+      setAccounts(accs || []);
+
+    } catch (err: any) {
+      setError(err.message || 'Failed to load payroll data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOpenCreate = () => {
+    const defaultDrafts: Record<string, { base: number, allowances: number, deductions: number }> = {};
+    employees.forEach(emp => {
+      const totalAllowances = Object.values(emp.allowances || {}).reduce((a, b) => a + b, 0);
+      defaultDrafts[emp.id] = {
+        base: emp.base_salary,
+        allowances: totalAllowances,
+        deductions: 0
+      };
+    });
+
+    const now = new Date();
+    const currentMonthName = monthOptions[now.getMonth()];
+
+    setRunDrafts(defaultDrafts);
+    setSelectedMonth(currentMonthName);
+    setSelectedYear('2026');
+    setShowModal(true);
+  };
+
+  const handleDeductionChange = (empId: string, val: string) => {
+    const deductions = parseFloat(val) || 0;
+    setRunDrafts(prev => ({
+      ...prev,
+      [empId]: {
+        ...prev[empId],
+        deductions
+      }
+    }));
+  };
+
+  const handleSavePayroll = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmitting) return;
+
+    if (!hasFeature('identity.user.create')) {
+      setError('Access denied: You do not have permissions to run payroll.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setError(null);
+    setSuccess(null);
+
+    const fullMonthStr = `${selectedMonth} ${selectedYear}`;
+
+    // Validate duplicate month run
+    const duplicate = payrollRuns.find(r => r.payroll_month === fullMonthStr);
+    if (duplicate) {
+      setError(`Payroll for ${fullMonthStr} has already been generated.`);
+      setIsSubmitting(false);
+      return;
+    }
+
+    try {
+      let totalGross = 0;
+      let totalDeductions = 0;
+      let totalNet = 0;
+
+      const payslipItems = Object.entries(runDrafts).map(([empId, item]) => {
+        const gross = item.base + item.allowances;
+        const net = gross - item.deductions;
+        
+        totalGross += gross;
+        totalDeductions += item.deductions;
+        totalNet += net;
+
+        return {
+          employee_id: empId,
+          base_salary: item.base,
+          allowances: item.allowances,
+          deductions: item.deductions,
+          net_salary: net,
+          payment_method: 'Bank Transfer'
+        };
+      });
+
+      // 1. Create payroll run record
+      const { data: run, error: runErr } = await supabase
+        .from('payroll_runs')
+        .insert({
+          payroll_month: fullMonthStr,
+          status: 'draft',
+          total_gross: totalGross,
+          total_deductions: totalDeductions,
+          total_net: totalNet
+        })
+        .select().single();
+
+      if (runErr) throw runErr;
+
+      // 2. Insert individual payslips
+      const slips = payslipItems.map(slip => ({
+        ...slip,
+        payroll_run_id: run.id
+      }));
+
+      const { error: slipsErr } = await supabase
+        .from('payslips')
+        .insert(slips);
+
+      if (slipsErr) throw slipsErr;
+
+      setSuccess(`Payroll draft for ${fullMonthStr} created successfully.`);
+      setShowModal(false);
+      await fetchData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to submit payroll run');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleViewDetails = async (run: PayrollRun) => {
+    setSelectedRun(run);
+    setLoadingPayslips(true);
+    try {
+      const { data, error: fetchErr } = await supabase
+        .from('payslips')
+        .select(`
+          *,
+          employees (
+            full_name,
+            role,
+            bank_name,
+            bank_account_number,
+            iban
+          )
+        `)
+        .eq('payroll_run_id', run.id);
+
+      if (fetchErr) throw fetchErr;
+      setRunPayslips(data || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch payslips');
+    } finally {
+      setLoadingPayslips(false);
+    }
+  };
+
+  const handlePostToLedger = async (runId: string) => {
+    if (!window.confirm('Are you sure you want to approve this payroll run and post it to the General Ledger? This action locks this payroll cycle.')) return;
+    setIsSubmitting(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      // 1. Fetch the run detail
+      const { data: run, error: runErr } = await supabase
+        .from('payroll_runs')
+        .select('*')
+        .eq('id', runId)
+        .single();
+
+      if (runErr) throw runErr;
+      if (run.status !== 'draft') {
+        throw new Error('This payroll run is already approved/posted.');
+      }
+
+      // Resolve general ledger accounts by code
+      const accountIdMap = new Map<string, string>(accounts.map(a => [a.code, a.id]));
+      const expenseId = accountIdMap.get('5000'); // Salaries & Wages Expense
+      const liabilityId = accountIdMap.get('2300'); // Payroll Payable
+      const withholdId = accountIdMap.get('2400'); // Tax/Social Security Withholdings
+
+      if (!expenseId || !liabilityId || !withholdId) {
+        throw new Error('General ledger configuration accounts (5000, 2300, 2400) not found. Please verify Chart of Accounts migration.');
+      }
+
+      // 2. Insert Journal Entry Header
+      const nowStr = new Date().toISOString().split('T')[0];
+      const refNum = `PR-${run.id.slice(0, 8).toUpperCase()}`;
+
+      const { data: newJE, error: jeErr } = await supabase
+        .from('journal_entries')
+        .insert({
+          entry_date: nowStr,
+          reference_number: refNum,
+          description: `Accrued Salaries & Wages for period: ${run.payroll_month}`,
+          status: 'posted'
+        })
+        .select().single();
+
+      if (jeErr) throw jeErr;
+
+      // 3. Create double-entry lines
+      // Debit Salaries Expense: Gross Salary
+      // Credit Payroll Payable: Net Salary
+      // Credit Withholdings: Deductions
+      const journalItems = [
+        {
+          journal_entry_id: newJE.id,
+          account_id: expenseId,
+          description: `Gross Wages & Salaries for ${run.payroll_month}`,
+          debit: run.total_gross,
+          credit: 0,
+          linked_payroll_run_id: run.id
+        },
+        {
+          journal_entry_id: newJE.id,
+          account_id: liabilityId,
+          description: `Net salaries payable to employees for ${run.payroll_month}`,
+          debit: 0,
+          credit: run.total_net,
+          linked_payroll_run_id: run.id
+        }
+      ];
+
+      // Add deduction withholdings line if deductions exist
+      if (run.total_deductions > 0) {
+        journalItems.push({
+          journal_entry_id: newJE.id,
+          account_id: withholdId,
+          description: `Payroll deductions & withholdings for ${run.payroll_month}`,
+          debit: 0,
+          credit: run.total_deductions,
+          linked_payroll_run_id: run.id
+        });
+      }
+
+      const { error: itemsErr } = await supabase
+        .from('journal_items')
+        .insert(journalItems);
+
+      if (itemsErr) throw itemsErr;
+
+      // 4. Update the payroll run record
+      const { error: updErr } = await supabase
+        .from('payroll_runs')
+        .update({
+          status: 'approved',
+          posted_journal_entry_id: newJE.id
+        })
+        .eq('id', run.id);
+
+      if (updErr) throw updErr;
+
+      setSuccess(`Payroll for ${run.payroll_month} successfully approved and posted to General Ledger.`);
+      setSelectedRun(null);
+      await fetchData();
+    } catch (err: any) {
+      setError(err.message || 'Ledger posting failed');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Payroll general ledger</h1>
+          <p className="text-gray-500 text-sm font-semibold">Disburse monthly wages and post entries to general ledger</p>
+        </div>
+        <button
+          onClick={handleOpenCreate}
+          disabled={employees.length === 0}
+          className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl shadow-lg shadow-blue-500/20 transition duration-150 text-sm disabled:opacity-50"
+        >
+          <Plus size={16} />
+          <span>Run Monthly Payroll</span>
+        </button>
+      </div>
+
+      {/* Messages */}
+      {error && (
+        <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 flex items-center space-x-2 text-sm">
+          <AlertCircle size={16} />
+          <span className="font-bold">{error}</span>
+        </div>
+      )}
+      {success && (
+        <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-700 flex items-center space-x-2 text-sm">
+          <Check size={16} />
+          <span className="font-bold">{success}</span>
+        </div>
+      )}
+
+      {/* Payroll History Panel */}
+      {loading ? (
+        <div className="flex flex-col items-center justify-center p-12 bg-white rounded-xl border border-gray-200 shadow-sm">
+          <Loader2 size={32} className="text-blue-500 animate-spin mb-2" />
+          <p className="text-gray-500 text-sm font-bold">Loading Payroll Register...</p>
+        </div>
+      ) : payrollRuns.length === 0 ? (
+        <div className="text-center p-12 bg-white rounded-xl border border-gray-200 shadow-sm">
+          <FileText size={48} className="text-gray-300 mx-auto mb-3" />
+          <p className="text-gray-500 font-bold text-lg mb-1">No Payroll Cycles Registered</p>
+          <p className="text-gray-400 text-sm">Create a payroll cycle to issue salary general ledger vouchers.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-6">
+          {/* History List */}
+          <div className="col-span-2 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+              <h2 className="text-xs font-black text-gray-400 uppercase tracking-widest">Payroll Register History</h2>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {payrollRuns.map(run => (
+                <div 
+                  key={run.id}
+                  onClick={() => handleViewDetails(run)}
+                  className={`p-6 cursor-pointer hover:bg-gray-50/80 transition duration-150 flex justify-between items-center ${
+                    selectedRun?.id === run.id ? 'bg-blue-50/40 border-l-4 border-blue-500' : ''
+                  }`}
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center space-x-2">
+                      <Calendar size={16} className="text-gray-400" />
+                      <span className="font-black text-gray-900">{run.payroll_month}</span>
+                      <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                        run.status === 'approved' 
+                          ? 'bg-emerald-100 text-emerald-800' 
+                          : 'bg-amber-100 text-amber-800'
+                      }`}>
+                        {run.status === 'approved' ? 'GL Posted' : 'Draft'}
+                      </span>
+                    </div>
+                    <div className="text-xs text-gray-500 font-semibold">
+                      Gross: {run.total_gross.toLocaleString()} AED | Net Payout: {run.total_net.toLocaleString()} AED
+                    </div>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-sm font-black text-gray-900">{run.total_net.toLocaleString()} AED</span>
+                    <ArrowRight size={16} className="text-gray-300" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Details Sidebar Panel */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-6 self-start">
+            {selectedRun ? (
+              <div className="space-y-6">
+                <div>
+                  <h3 className="text-sm font-black text-gray-400 uppercase tracking-widest mb-1">Cycle Details</h3>
+                  <h2 className="text-xl font-black text-gray-900">{selectedRun.payroll_month}</h2>
+                </div>
+
+                <div className="space-y-2.5 p-4 bg-gray-50 rounded-xl border border-gray-100">
+                  <div className="flex justify-between text-xs font-semibold text-gray-500">
+                    <span>Gross Compensation:</span>
+                    <span className="font-bold text-gray-900">{selectedRun.total_gross.toLocaleString()} AED</span>
+                  </div>
+                  <div className="flex justify-between text-xs font-semibold text-gray-500">
+                    <span>Total Deductions:</span>
+                    <span className="font-bold text-red-600">-{selectedRun.total_deductions.toLocaleString()} AED</span>
+                  </div>
+                  <div className="border-t border-gray-200 pt-2.5 flex justify-between text-sm font-black text-gray-900">
+                    <span>Net Disbursable:</span>
+                    <span>{selectedRun.total_net.toLocaleString()} AED</span>
+                  </div>
+                </div>
+
+                {selectedRun.status === 'draft' && (
+                  <button
+                    onClick={() => handlePostToLedger(selectedRun.id)}
+                    disabled={isSubmitting}
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-4 rounded-xl shadow-lg shadow-emerald-500/20 transition duration-150 text-sm flex items-center justify-center space-x-2"
+                  >
+                    {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
+                    <span>Approve & Post GL Entries</span>
+                  </button>
+                )}
+
+                {/* Payslips breakdown */}
+                <div>
+                  <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3">Individual Payslips</h4>
+                  {loadingPayslips ? (
+                    <div className="flex justify-center py-6">
+                      <Loader2 size={24} className="text-blue-500 animate-spin" />
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {runPayslips.map(ps => (
+                        <div key={ps.id} className="p-3 bg-white border border-gray-100 rounded-lg flex justify-between items-center hover:border-gray-200 transition">
+                          <div>
+                            <p className="text-xs font-bold text-gray-900">{ps.employees?.full_name}</p>
+                            <p className="text-[10px] text-gray-400 capitalize font-bold">{ps.employees?.role}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xs font-black text-gray-900">{ps.net_salary.toLocaleString()} AED</p>
+                            <span className="text-[9px] text-gray-400 font-mono">{ps.employees?.bank_name}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-12 text-gray-400">
+                <FileText size={32} className="mx-auto text-gray-300 mb-2" />
+                <p className="text-xs font-bold">Select a payroll cycle from the ledger history to view individual payslips and financial details.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Modal - Create Payroll */}
+      {showModal && (
+        <div className="fixed inset-0 bg-gray-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+            {/* Header */}
+            <div className="p-6 border-b border-gray-200 flex justify-between items-center shrink-0">
+              <h3 className="text-lg font-black text-gray-900 tracking-tight">Run New Payroll Cycle</h3>
+              <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-gray-600">
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Content Form */}
+            <form onSubmit={handleSavePayroll} className="flex-1 overflow-y-auto p-6 space-y-6">
+              {/* Date Selectors */}
+              <div className="flex space-x-4 bg-gray-50 p-4 rounded-xl border border-gray-100">
+                <div className="w-1/2">
+                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Disbursement Month</label>
+                  <select
+                    value={selectedMonth}
+                    onChange={(e) => setSelectedMonth(e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-semibold"
+                  >
+                    {monthOptions.map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="w-1/2">
+                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Disbursement Year</label>
+                  <select
+                    value={selectedYear}
+                    onChange={(e) => setSelectedYear(e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-semibold"
+                  >
+                    <option value="2026">2026</option>
+                    <option value="2027">2027</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Personnel List */}
+              <div className="space-y-3">
+                <h4 className="text-xs font-black uppercase text-gray-400 tracking-wider">Active Employees Compensation List</h4>
+                
+                <div className="border border-gray-200 rounded-xl overflow-hidden">
+                  <table className="min-w-full divide-y divide-gray-200 text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Employee</th>
+                        <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Base Salary</th>
+                        <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Allowances</th>
+                        <th className="px-4 py-3 text-left text-[10px] font-black text-gray-400 uppercase tracking-widest">Deductions (AED)</th>
+                        <th className="px-4 py-3 text-right text-[10px] font-black text-gray-400 uppercase tracking-widest">Net Salary</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 bg-white">
+                      {employees.map(emp => {
+                        const item = runDrafts[emp.id] || { base: 0, allowances: 0, deductions: 0 };
+                        const net = item.base + item.allowances - item.deductions;
+                        
+                        return (
+                          <tr key={emp.id} className="hover:bg-gray-50/50">
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <div className="flex items-center space-x-2">
+                                <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold">
+                                  {emp.full_name.charAt(0)}
+                                </div>
+                                <div>
+                                  <p className="font-bold text-gray-900">{emp.full_name}</p>
+                                  <p className="text-[10px] text-gray-400 capitalize font-bold">{emp.role}</p>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap font-semibold text-gray-700">
+                              {item.base.toLocaleString()} AED
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap font-semibold text-gray-700">
+                              {item.allowances.toLocaleString()} AED
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                placeholder="0.00"
+                                value={item.deductions || ''}
+                                onChange={(e) => handleDeductionChange(emp.id, e.target.value)}
+                                className="w-24 border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 font-bold"
+                              />
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-right font-black text-gray-900">
+                              {net.toLocaleString()} AED
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Form Actions Footer */}
+              <div className="pt-6 border-t border-gray-200 flex justify-between items-center shrink-0">
+                <div className="text-sm font-semibold text-gray-500">
+                  Total gross estimation:{' '}
+                  <span className="font-black text-gray-900">
+                    {Object.values(runDrafts).reduce((a, b) => a + b.base + b.allowances, 0).toLocaleString()} AED
+                  </span>
+                </div>
+                <div className="flex space-x-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowModal(false)}
+                    className="px-4 py-2.5 border border-gray-200 rounded-xl text-sm font-bold text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold shadow-lg shadow-blue-500/20 flex items-center space-x-2"
+                  >
+                    {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                    <span>Confirm Draft</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Payroll;

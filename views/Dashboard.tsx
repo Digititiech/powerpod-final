@@ -22,7 +22,9 @@ import {
   FileUp,
   Zap,
   Files,
-  Send
+  Send,
+  AlertCircle,
+  ShieldCheck
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -57,7 +59,11 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     stations: 0,
     pendingPayouts: 0,
     payout: 0,
-    netIncome: 0
+    netIncome: 0,
+    collectedRevenue: 0,
+    uncollectedRevenue: 0,
+    payoutPaid: 0,
+    payoutPayable: 0
   });
   
   const [chartData, setChartData] = useState<any[]>([]);
@@ -302,6 +308,38 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       // Platform Net Income = Total Sales - Total Merchant Payout
       const platformNetIncome = totalRevenue - totalPayout;
 
+      // 3. Fetch general ledger balances for double-entry auditing metrics
+      const { data: ledgerItems } = await supabase
+        .from('journal_items')
+        .select(`
+          debit,
+          credit,
+          accounts (code)
+        `);
+
+      let arBalance = 0;
+      let apBalance = 0;
+      let cashStripe = 0;
+      let locShareCost = 0;
+
+      if (ledgerItems) {
+        ledgerItems.forEach((item: any) => {
+          const code = item.accounts?.code;
+          const debit = Number(item.debit) || 0;
+          const credit = Number(item.credit) || 0;
+
+          if (code === '1100') {
+            arBalance += (debit - credit);
+          } else if (code === '2100') {
+            apBalance += (credit - debit);
+          } else if (code === '1010') {
+            cashStripe += (debit - credit);
+          } else if (code === '5100') {
+            locShareCost += (debit - credit);
+          }
+        });
+      }
+
       setStats({
         revenue: totalRevenue,
         profit: platformNetIncome, 
@@ -309,7 +347,11 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         stations: sCount || 0,
         pendingPayouts: totalPending,
         payout: totalPayout,
-        netIncome: platformNetIncome
+        netIncome: platformNetIncome,
+        collectedRevenue: cashStripe,
+        uncollectedRevenue: arBalance,
+        payoutPaid: locShareCost - apBalance,
+        payoutPayable: apBalance
       });
 
       // 4. Chart Data (From Aggregated Transactions)
@@ -625,6 +667,14 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
             <StatCard label="Total Merchant Payout" value={`AED ${stats.payout.toLocaleString()}`} subtext="After Stripe & Tax" icon={TrendingUp} color="green" />
             <StatCard label="Unsettled Liabilities" value={`AED ${stats.pendingPayouts.toLocaleString()}`} subtext="Pending Merchant Transfers" icon={Clock} color="amber" />
             <StatCard label="Total Income" value={`AED ${stats.netIncome.toLocaleString()}`} subtext="Platform Net Earnings" icon={Users} color="purple" />
+          </div>
+
+          {/* General Ledger Reconciled Audit Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 mt-6">
+            <StatCard label="Collected Cash" value={`AED ${stats.collectedRevenue.toLocaleString()}`} subtext="Cleared via Stripe Clearing" icon={CheckCircle2} color="green" />
+            <StatCard label="Uncollected (A/R)" value={`AED ${stats.uncollectedRevenue.toLocaleString()}`} subtext="General Ledger Outstanding" icon={AlertCircle} color="amber" />
+            <StatCard label="Owed to Locations" value={`AED ${stats.payoutPayable.toLocaleString()}`} subtext="Accounts Payable Balance" icon={Clock} color="purple" />
+            <StatCard label="Disbursed to Locations" value={`AED ${stats.payoutPaid.toLocaleString()}`} subtext="Settled Merchant Ledger" icon={ShieldCheck} color="blue" />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-10">

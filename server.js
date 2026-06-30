@@ -14,11 +14,33 @@ import IORedis from 'ioredis';
 dotenv.config();
 
 // --- Redis & Queue Setup ---
+let isRedisConnected = false;
+let redisErrorLogged = false;
+
 const redisConnection = new IORedis({
     host: '127.0.0.1',
     port: 6379,
-    maxRetriesPerRequest: null // Required by BullMQ
+    maxRetriesPerRequest: null, // Required by BullMQ
+    lazyConnect: true // Prevent immediate connection crash
 });
+
+// Graceful connection checking
+redisConnection.on('connect', () => {
+    isRedisConnected = true;
+    redisErrorLogged = false;
+    console.log('Redis connected successfully. WhatsApp messaging queue initialized.');
+});
+
+redisConnection.on('error', (err) => {
+    isRedisConnected = false;
+    if (!redisErrorLogged) {
+        console.warn('Redis is offline or not running. Falling back to direct in-memory message delivery.');
+        redisErrorLogged = true;
+    }
+});
+
+// Connect to Redis in background
+redisConnection.connect().catch(() => {});
 
 const messageQueue = new Queue('whatsapp-messages', { connection: redisConnection });
 
@@ -335,6 +357,22 @@ async function handleDisconnect(req, res) {
     }
 }
 
+// Direct sending function when Redis is offline
+async function sendWhatsAppDirect(number, message) {
+    if (connectionStatus !== 'connected' || !sock) {
+        throw new Error('WhatsApp not connected');
+    }
+
+    let formattedNumber = number.replace(/\D/g, '');
+    if (!formattedNumber.endsWith('@s.whatsapp.net')) {
+        formattedNumber += '@s.whatsapp.net';
+    }
+
+    console.log(`Sending WhatsApp direct (In-Memory Fallback): to ${formattedNumber}`);
+    const sentMsg = await sock.sendMessage(formattedNumber, { text: message });
+    return sentMsg;
+}
+
 app.post('/api/send-whatsapp', async (req, res) => {
     try {
         const { number, message } = req.body;
@@ -343,18 +381,28 @@ app.post('/api/send-whatsapp', async (req, res) => {
             return res.status(400).json({ error: 'Missing number or message' });
         }
 
-        // Add to Queue instead of sending directly
-        const job = await messageQueue.add('send-message', { number, message }, {
-            attempts: 3, // Retry 3 times if it fails
-            backoff: {
-                type: 'exponential',
-                delay: 1000,
+        if (isRedisConnected) {
+            // Add to Queue when Redis is online
+            const job = await messageQueue.add('send-message', { number, message }, {
+                attempts: 3,
+                backoff: {
+                    type: 'exponential',
+                    delay: 1000,
+                }
+            });
+            res.json({ success: true, message: 'Message Queued (Redis)', jobId: job.id });
+        } else {
+            // Direct sending (In-memory fallback) when Redis is offline
+            if (connectionStatus !== 'connected' || !sock) {
+                return res.status(503).json({ error: 'WhatsApp Gateway offline (Not connected/authenticated)' });
             }
-        });
-
-        res.json({ success: true, message: 'Message Queued', jobId: job.id });
+            
+            // Fire-and-forget or await direct send. Awaiting ensures status confirmation for the caller.
+            const sentMsg = await sendWhatsAppDirect(number, message);
+            res.json({ success: true, message: 'Message Sent Direct (In-Memory Fallback)', messageId: sentMsg?.key?.id });
+        }
     } catch (error) {
-        console.error('Error queuing WhatsApp message:', error);
+        console.error('Error delivering WhatsApp message:', error);
         res.status(500).json({ error: error.message });
     }
 });

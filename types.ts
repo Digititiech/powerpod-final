@@ -1,7 +1,7 @@
 
 export type UserRole = 'admin' | 'staff' | 'technician';
 
-export type View = 'dashboard' | 'merchants' | 'assets' | 'processor' | 'reports' | 'settings' | 'users' | 'transactions';
+export type View = 'dashboard' | 'merchants' | 'assets' | 'processor' | 'reports' | 'settings' | 'users' | 'transactions' | 'employees' | 'payroll' | 'ledger';
 
 export type FeatureKey =
   | 'mode.viewOnly'
@@ -12,6 +12,9 @@ export type FeatureKey =
   | 'nav.reports'
   | 'nav.identity'
   | 'nav.settings'
+  | 'nav.employees'
+  | 'nav.payroll'
+  | 'nav.ledger'
   | 'dashboard.transactions.view'
   | 'dashboard.audit.download'
   | 'assets.deploy'
@@ -165,3 +168,96 @@ export interface SalesTransaction {
   tax_fee: number;
   created_at: string;
 }
+
+export type AccountClass = 'asset' | 'liability' | 'equity' | 'revenue' | 'expense';
+export type JournalEntryStatus = 'draft' | 'posted' | 'voided';
+export type EmployeeStatus = 'active' | 'inactive' | 'terminated';
+export type PayrollStatus = 'draft' | 'approved' | 'paid';
+
+export interface Account {
+  id: string;
+  code: string;
+  name: string;
+  class: AccountClass;
+  parent_id?: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CostCenter {
+  id: string;
+  code: string;
+  name: string;
+  description?: string | null;
+  created_at: string;
+}
+
+export interface JournalEntry {
+  id: string;
+  entry_date: string;
+  reference_number?: string | null;
+  description?: string | null;
+  status: JournalEntryStatus;
+  period_locked: boolean;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JournalItem {
+  id: string;
+  journal_entry_id: string;
+  account_id: string;
+  description?: string | null;
+  debit: number;
+  credit: number;
+  cost_center_id?: string | null;
+  linked_transaction_id?: string | null;
+  linked_payroll_run_id?: string | null;
+  created_at: string;
+}
+
+export interface Employee {
+  id: string;
+  full_name: string;
+  email: string;
+  phone?: string | null;
+  role: string;
+  status: EmployeeStatus;
+  base_salary: number;
+  allowances: Record<string, number>;
+  bank_name: string;
+  bank_account_number: string;
+  iban: string;
+  cost_center_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PayrollRun {
+  id: string;
+  payroll_month: string;
+  status: PayrollStatus;
+  total_gross: number;
+  total_deductions: number;
+  total_net: number;
+  created_by?: string | null;
+  approved_by?: string | null;
+  posted_journal_entry_id?: string | null;
+  created_at: string;
+}
+
+export interface Payslip {
+  id: string;
+  payroll_run_id: string;
+  employee_id: string;
+  base_salary: number;
+  allowances: number;
+  deductions: number;
+  net_salary: number;
+  payment_method?: string | null;
+  reference_number?: string | null;
+  created_at: string;
+}
+
