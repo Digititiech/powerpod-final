@@ -43,6 +43,9 @@ redisConnection.on('error', (err) => {
 redisConnection.connect().catch(() => {});
 
 const messageQueue = new Queue('whatsapp-messages', { connection: redisConnection });
+messageQueue.on('error', (err) => {
+    // Suppress unhandled exceptions when Redis is offline
+});
 
 // Queue Worker (Process messages in background)
 const worker = new Worker('whatsapp-messages', async (job) => {
@@ -70,6 +73,11 @@ const worker = new Worker('whatsapp-messages', async (job) => {
 }, { 
     connection: redisConnection,
     concurrency: 5 // Process 5 messages at once
+});
+
+// Suppress unhandled exceptions when Redis is offline
+worker.on('error', (err) => {
+    // Suppress unhandled exceptions when Redis is offline
 });
 
 worker.on('completed', job => {
