@@ -906,6 +906,18 @@ const NayaxProcessor: React.FC = () => {
       setSyncStatus('Nayax Data Synced Successfully!');
       setSuccessMessage(`Successfully processed & synced ${stats?.createdRecords || 0} created, ${stats?.updatedRecords || 0} updated, and ${stats?.unchangedRecords || 0} unchanged records.`);
       
+      // Clear local reports cache to ensure fresh data displays in Monthly Reports
+      try {
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith('reports_cache_')) {
+            localStorage.removeItem(key);
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to clear reports cache:', e);
+      }
+
       setTimeout(() => {
         setIsSyncing(false);
         setSyncStatus(null);

@@ -338,6 +338,20 @@ const MonthlyReports: React.FC = () => {
 
   const fetchReports = async (forceRefresh = false) => {
     setLoading(true);
+
+    if (forceRefresh) {
+      try {
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith('reports_cache_')) {
+            localStorage.removeItem(key);
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to clear cache on force refresh:', e);
+      }
+    }
+
     const cacheKey = `reports_cache_v4_${selectedGlobalMonths.slice().sort().join('_')}`;
 
     if (!forceRefresh) {
@@ -2075,7 +2089,10 @@ const MonthlyReports: React.FC = () => {
           <p className="text-gray-500 mt-1 font-medium">Verified payout intelligence for Powerpod partners.</p>
         </div>
         <div className="flex items-center space-x-3">
-          <button onClick={() => fetchReports(true)} className="p-3 bg-white border border-gray-100 rounded-2xl text-gray-400 hover:text-blue-600 transition-all shadow-sm">
+          <button onClick={async () => {
+            await fetchAvailableMonths();
+            await fetchReports(true);
+          }} className="p-3 bg-white border border-gray-100 rounded-2xl text-gray-400 hover:text-blue-600 transition-all shadow-sm" title="Refresh Reports Data">
             <RefreshCw size={20} className={loading ? 'animate-spin' : ''} />
           </button>
           

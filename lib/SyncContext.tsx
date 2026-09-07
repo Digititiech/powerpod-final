@@ -352,6 +352,18 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         }
       }
 
+      // Clear local reports cache so Monthly Reports re-fetches live data from Supabase
+      try {
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith('reports_cache_')) {
+            localStorage.removeItem(key);
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to clear reports cache:', e);
+      }
+
       setState(s => ({ ...s, status: 'Multi-Period Ledger Synced Successfully', progress: '100%' }));
       setTimeout(() => setState(s => ({ ...s, isSyncing: false, status: null })), 5000);
     } catch (err: any) {
