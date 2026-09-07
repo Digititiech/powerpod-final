@@ -121,34 +121,35 @@ const NayaxProcessor: React.FC = () => {
 
       if (dateStr instanceof Date) {
         date = dateStr;
-      } else if (typeof dateStr === 'number') {
-        // Excel serial date number
-        date = new Date(Math.round((dateStr - 25569) * 86400 * 1000));
       } else {
         const str = String(dateStr).trim();
-        // Match DD/MM/YYYY or DD-MM-YYYY or YYYY-MM-DD
-        const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
-        const ymdMatch = str.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+        const numVal = Number(str);
 
-        if (dmyMatch) {
-          const p1 = parseInt(dmyMatch[1], 10);
-          const p2 = parseInt(dmyMatch[2], 10);
-          const year = parseInt(dmyMatch[3], 10);
-
-          if (p1 > 12) {
-            // DD/MM/YYYY
-            date = new Date(year, p2 - 1, p1);
-          } else if (p2 > 12) {
-            // MM/DD/YYYY
-            date = new Date(year, p1 - 1, p2);
-          } else {
-            // Default DD/MM/YYYY for Nayax GCC exports
-            date = new Date(year, p2 - 1, p1);
-          }
-        } else if (ymdMatch) {
-          date = new Date(parseInt(ymdMatch[1], 10), parseInt(ymdMatch[2], 10) - 1, parseInt(ymdMatch[3], 10));
+        if (!isNaN(numVal) && numVal > 30000 && numVal < 100000) {
+          // Excel serial date number (e.g. 46241.767)
+          date = new Date(Math.round((numVal - 25569) * 86400 * 1000));
         } else {
-          date = new Date(str);
+          // Match DD/MM/YYYY or DD-MM-YYYY or YYYY-MM-DD
+          const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+          const ymdMatch = str.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+
+          if (dmyMatch) {
+            const p1 = parseInt(dmyMatch[1], 10);
+            const p2 = parseInt(dmyMatch[2], 10);
+            const year = parseInt(dmyMatch[3], 10);
+
+            if (p1 > 12) {
+              date = new Date(year, p2 - 1, p1);
+            } else if (p2 > 12) {
+              date = new Date(year, p1 - 1, p2);
+            } else {
+              date = new Date(year, p2 - 1, p1);
+            }
+          } else if (ymdMatch) {
+            date = new Date(parseInt(ymdMatch[1], 10), parseInt(ymdMatch[2], 10) - 1, parseInt(ymdMatch[3], 10));
+          } else {
+            date = new Date(str);
+          }
         }
       }
 
@@ -156,6 +157,30 @@ const NayaxProcessor: React.FC = () => {
       return date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
     } catch {
       return 'Unknown Period';
+    }
+  };
+
+  const formatDateString = (dateStr: any): string => {
+    if (!dateStr) return '';
+    try {
+      let date: Date | null = null;
+      if (dateStr instanceof Date) {
+        date = dateStr;
+      } else {
+        const str = String(dateStr).trim();
+        const numVal = Number(str);
+
+        if (!isNaN(numVal) && numVal > 30000 && numVal < 100000) {
+          date = new Date(Math.round((numVal - 25569) * 86400 * 1000));
+        } else {
+          date = new Date(str);
+        }
+      }
+
+      if (!date || isNaN(date.getTime())) return String(dateStr);
+      return date.toISOString().replace('T', ' ').substring(0, 19);
+    } catch {
+      return String(dateStr);
     }
   };
 
@@ -386,6 +411,7 @@ const NayaxProcessor: React.FC = () => {
         // Network Fee calculation: 0.50 AED + (Actual Fee * 2.25%)
         const networkFee = Number((0.50 + (actualFee * 0.0225)).toFixed(2));
         const merchant = extractMerchant(rawMerchant);
+        const formattedDate = formatDateString(rawRentTime);
         const period = parsePeriod(rawRentTime);
 
         merchantSet.add(merchant);
@@ -397,7 +423,7 @@ const NayaxProcessor: React.FC = () => {
           venue: rawMerchant,
           station: rawMerchant,
           rawDate: rawRentTime,
-          rentTime: rawRentTime,
+          rentTime: formattedDate || rawRentTime,
           reportMonth: period,
           actualFee: actualFee,
           networkFee: networkFee,
