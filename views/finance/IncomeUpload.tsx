@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   RefreshCw, Loader2, Table as TableIcon, FileText, 
   TrendingUp, Calendar, Coins, Building2, AlertCircle, CheckCircle2,
-  ShieldCheck
+  ShieldCheck, Trash2, AlertTriangle
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAccessControl } from '../../lib/AccessControlContext';
@@ -36,6 +36,26 @@ const IncomeUpload: React.FC = () => {
   const [reports, setReports] = useState<MonthlyReport[]>([]);
   const [selectedReport, setSelectedReport] = useState<MonthlyReport | null>(null);
   const [summaries, setSummaries] = useState<MerchantPeriodSummary[]>([]);
+  const [deletingIncomeReport, setDeletingIncomeReport] = useState<any | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDeleteIncome = async () => {
+    if (!deletingIncomeReport) return;
+    setDeleting(true);
+    try {
+      const { error: err } = await supabase.rpc('delete_monthly_income_with_log', {
+        p_report_id: deletingIncomeReport.id
+      });
+      if (err) throw err;
+      setDeletingIncomeReport(null);
+      await fetchReports();
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete income.');
+    } finally {
+      setDeleting(false);
+    }
+  };
   
   const [loading, setLoading] = useState<boolean>(true);
   const [loadingSummaries, setLoadingSummaries] = useState<boolean>(false);
@@ -471,6 +491,18 @@ const IncomeUpload: React.FC = () => {
                     <span>Post to General Ledger</span>
                   </button>
                 )}
+                {selectedReport && selectedReport.status === 'Finalized' && hasFeature('ledger.journal.delete') && (
+                  <button
+                    onClick={() => {
+                      setDeletingIncomeReport(selectedReport);
+                      setDeleteConfirmText('');
+                    }}
+                    className="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-black transition-all flex items-center space-x-1.5 shadow-md shadow-red-500/10"
+                  >
+                    <Trash2 size={12} />
+                    <span>Unfinalize & Delete GL</span>
+                  </button>
+                )}
               </div>
 
               {loadingSummaries ? (
@@ -531,6 +563,67 @@ const IncomeUpload: React.FC = () => {
                   </table>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deletingIncomeReport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 p-6 space-y-4">
+            <div className="flex items-center space-x-3 text-red-600">
+              <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center">
+                <AlertTriangle size={20} />
+              </div>
+              <div>
+                <h3 className="text-gray-900 font-black text-sm">Confirm Income Deletion</h3>
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
+                  Period: {deletingIncomeReport.report_month}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-red-50/50 border border-red-100 rounded-xl space-y-1">
+              <p className="text-xs text-red-800 font-bold">Warning:</p>
+              <p className="text-[11px] text-red-700 font-semibold leading-relaxed">
+                This will delete the posted monthly general ledger entries for <strong>{deletingIncomeReport.report_month}</strong> and revert the report status to <strong>Draft</strong>.
+                This data will be archived in the Revision Log and can only be restored within 24 hours.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest block">
+                Type <span className="text-red-600">im sure to delete</span> to confirm *
+              </label>
+              <input
+                type="text"
+                placeholder="Type here..."
+                value={deleteConfirmText}
+                onChange={e => setDeleteConfirmText(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
+              />
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setDeletingIncomeReport(null)}
+                className="text-gray-500 hover:text-gray-700 font-bold text-xs transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteIncome}
+                disabled={deleteConfirmText !== 'im sure to delete' || deleting}
+                className={`flex items-center space-x-1.5 px-4 py-2 rounded-lg text-xs font-black transition-all ${
+                  deleteConfirmText === 'im sure to delete' && !deleting
+                    ? 'bg-red-600 hover:bg-red-700 text-white shadow-sm shadow-red-200'
+                    : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                }`}
+              >
+                {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                <span>{deleting ? 'Deleting...' : 'Delete Income'}</span>
+              </button>
             </div>
           </div>
         </div>

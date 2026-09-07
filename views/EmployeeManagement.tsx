@@ -15,7 +15,8 @@ import {
   Loader2, 
   X, 
   Search,
-  Plus
+  Plus,
+  Percent
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Employee, CostCenter } from '../types';
@@ -80,7 +81,8 @@ const EmployeeManagement: React.FC = () => {
       bank_name: '',
       bank_account_number: '',
       iban: '',
-      cost_center_id: costCenters[0]?.id || ''
+      cost_center_id: costCenters[0]?.id || '',
+      sales_percentage: 0
     });
     setAllowanceKey('');
     setAllowanceVal('');
@@ -142,7 +144,8 @@ const EmployeeManagement: React.FC = () => {
         bank_name: editingEmployee.bank_name,
         bank_account_number: editingEmployee.bank_account_number,
         iban: editingEmployee.iban,
-        cost_center_id: editingEmployee.cost_center_id || null
+        cost_center_id: editingEmployee.cost_center_id || null,
+        sales_percentage: Number(editingEmployee.sales_percentage) || 0
       };
 
       if (editingEmployee.id) {
@@ -315,8 +318,15 @@ const EmployeeManagement: React.FC = () => {
                           </span>
                         )}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-black text-gray-900">
-                        {emp.base_salary.toLocaleString('en-US', { minimumFractionDigits: 2 })} AED
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm font-black text-gray-900">
+                          {emp.base_salary.toLocaleString('en-US', { minimumFractionDigits: 2 })} AED
+                        </div>
+                        {emp.sales_percentage !== undefined && emp.sales_percentage > 0 && (
+                          <div className="text-[10px] text-purple-600 font-bold mt-0.5">
+                            Sales Comm: {emp.sales_percentage}%
+                          </div>
+                        )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <p className="text-sm font-bold text-gray-900">{totalAllowances.toLocaleString('en-US', { minimumFractionDigits: 2 })} AED</p>
@@ -475,6 +485,23 @@ const EmployeeManagement: React.FC = () => {
                         step="0.01"
                         value={editingEmployee.base_salary || 0}
                         onChange={(e) => setEditingEmployee({ ...editingEmployee, base_salary: parseFloat(e.target.value) || 0 })}
+                        className="w-full border border-gray-200 rounded-lg pl-8 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-black"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Sales Commission Percentage (%)</label>
+                    <div className="relative">
+                      <Percent className="absolute left-3 top-3.5 text-gray-400" size={16} />
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.1"
+                        placeholder="e.g. 10"
+                        value={editingEmployee.sales_percentage || 0}
+                        onChange={(e) => setEditingEmployee({ ...editingEmployee, sales_percentage: parseFloat(e.target.value) || 0 })}
                         className="w-full border border-gray-200 rounded-lg pl-8 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-black"
                       />
                     </div>

@@ -13,11 +13,15 @@ import {
   FileDown,
   FileSpreadsheet,
   AlertTriangle,
-  Save
+  Save,
+  CreditCard,
+  Layers,
+  Sparkles
 } from 'lucide-react';
 import { useSync } from '../lib/SyncContext';
 import { supabase } from '../lib/supabase';
 import { useAccessControl } from '../lib/AccessControlContext';
+import NayaxProcessor from './NayaxProcessor';
 
 const DataProcessor: React.FC = () => {
   const { hasFeature } = useAccessControl();
@@ -36,6 +40,7 @@ const DataProcessor: React.FC = () => {
     runSync 
   } = useSync();
 
+  const [activeTab, setActiveTab] = useState<'stripe' | 'nayax'>('stripe');
   const [isProcessing, setIsProcessing] = useState(false);
   const [missingMerchants, setMissingMerchants] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -364,17 +369,57 @@ const DataProcessor: React.FC = () => {
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h1 className="text-3xl font-black text-gray-900 tracking-tight">Ledger Operations</h1>
-          <p className="text-gray-500 mt-1 font-medium">Unified processing for Master Batch and Stripe Orders.</p>
+          <p className="text-gray-500 mt-1 font-medium">
+            {activeTab === 'stripe' ? 'Unified processing for Master Batch and Stripe Orders.' : 'Independent processing for Nayax sales data.'}
+          </p>
         </div>
-        {results.length > 0 && !isSyncing && (
-          <button onClick={handleClear} className="p-3 text-red-500 hover:bg-red-50 rounded-2xl transition-all">
-            <Trash2 size={24} />
-          </button>
-        )}
+
+        <div className="flex items-center gap-3">
+          {activeTab === 'stripe' && results.length > 0 && !isSyncing && (
+            <button onClick={handleClear} className="p-3 text-red-500 hover:bg-red-50 rounded-2xl transition-all" title="Clear Stripe Results">
+              <Trash2 size={24} />
+            </button>
+          )}
+
+          {/* Navigation Tabs */}
+          <div className="bg-gray-100 p-1.5 rounded-2xl flex items-center gap-1 border border-gray-200/60 shadow-inner">
+            <button
+              onClick={() => setActiveTab('stripe')}
+              className={`px-5 py-2.5 rounded-xl font-black text-xs transition-all flex items-center gap-2 ${
+                activeTab === 'stripe'
+                  ? 'bg-white text-gray-900 shadow-sm border border-gray-200/80'
+                  : 'text-gray-500 hover:text-gray-900 hover:bg-white/50'
+              }`}
+            >
+              <CreditCard size={16} />
+              <span>Stripe & Master Batch</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('nayax')}
+              className={`px-5 py-2.5 rounded-xl font-black text-xs transition-all flex items-center gap-2 ${
+                activeTab === 'nayax'
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-200'
+                  : 'text-gray-500 hover:text-gray-900 hover:bg-white/50'
+              }`}
+            >
+              <Sparkles size={16} />
+              <span>Import Sales Data</span>
+              <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded text-[9px] font-black uppercase">
+                Nayax
+              </span>
+            </button>
+          </div>
+        </div>
       </div>
+
+      {activeTab === 'nayax' ? (
+        <NayaxProcessor />
+      ) : (
+        <>
 
       {error && (
         <div className="bg-red-50 border border-red-200 p-6 rounded-[32px] flex items-start space-x-4 shadow-sm">
@@ -586,6 +631,8 @@ const DataProcessor: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );

@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Plus, Trash2, AlertCircle, CheckCircle2, Loader2,
-  Upload, X, ChevronDown, Building2, Search, UserPlus, Receipt
+  Upload, X, ChevronDown, Building2, Search, UserPlus, Receipt, AlertTriangle
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { postExpenseEntry } from '../../lib/accountingEngine';
 import { ExpenseCategory, EXPENSE_CATEGORY_MAP, Supplier } from '../../types';
+import { useAccessControl } from '../../lib/AccessControlContext';
 
 const fmt = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const today = () => new Date().toISOString().split('T')[0];
@@ -31,9 +32,30 @@ const DEFAULT_FORM: ExpenseFormState = {
 };
 
 const ExpenseForm: React.FC = () => {
+  const { hasFeature } = useAccessControl();
   const [form, setForm] = useState<ExpenseFormState>(DEFAULT_FORM);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [recentExpenses, setRecentExpenses] = useState<any[]>([]);
+  const [deletingExpense, setDeletingExpense] = useState<any | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDeleteExpense = async () => {
+    if (!deletingExpense) return;
+    setDeleting(true);
+    try {
+      const { error: err } = await supabase.rpc('delete_expense_with_log', {
+        p_expense_id: deletingExpense.id
+      });
+      if (err) throw err;
+      setDeletingExpense(null);
+      fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete expense.');
+    } finally {
+      setDeleting(false);
+    }
+  };
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [supplierSearch, setSupplierSearch] = useState('');
   const [showSupplierDropdown, setShowSupplierDropdown] = useState(false);
@@ -404,7 +426,7 @@ const ExpenseForm: React.FC = () => {
           <div className="divide-y divide-gray-50">
             {recentExpenses.map(exp => (
               <div key={exp.id} className="px-6 py-3.5 hover:bg-gray-50/50 transition">
-                <div className="flex justify-between items-start">
+                <div className="flex justify-between items-center">
                   <div>
                     <p className="text-xs font-black text-gray-900">{exp.supplier_name}</p>
                     <p className="text-[10px] text-gray-400 font-semibold mt-0.5">
@@ -412,10 +434,24 @@ const ExpenseForm: React.FC = () => {
                       {' · '}{exp.expense_date}
                     </p>
                   </div>
-                  <div className="text-right">
-                    <p className="text-xs font-black text-gray-900">AED {fmt(exp.total_amount)}</p>
-                    {exp.has_vat && (
-                      <p className="text-[10px] text-orange-500 font-bold">incl. VAT</p>
+                  <div className="flex items-center space-x-3 text-right">
+                    <div>
+                      <p className="text-xs font-black text-gray-900">AED {fmt(exp.total_amount)}</p>
+                      {exp.has_vat && (
+                        <p className="text-[10px] text-orange-500 font-bold">incl. VAT</p>
+                      )}
+                    </div>
+                    {hasFeature('ledger.journal.delete') && exp.status !== 'voided' && (
+                      <button
+                        onClick={() => {
+                          setDeletingExpense(exp);
+                          setDeleteConfirmText('');
+                        }}
+                        className="text-gray-400 hover:text-red-600 transition-colors p-1 rounded hover:bg-gray-100/80"
+                        title="Delete Expense Entry"
+                      >
+                        <Trash2 size={13} />
+                      </button>
                     )}
                   </div>
                 </div>
@@ -424,6 +460,67 @@ const ExpenseForm: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {deletingExpense && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 p-6 space-y-4">
+            <div className="flex items-center space-x-3 text-red-600">
+              <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center">
+                <AlertTriangle size={20} />
+              </div>
+              <div>
+                <h3 className="text-gray-900 font-black text-sm">Confirm Expense Deletion</h3>
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
+                  Supplier: {deletingExpense.supplier_name}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-red-50/50 border border-red-100 rounded-xl space-y-1">
+              <p className="text-xs text-red-800 font-bold">Warning:</p>
+              <p className="text-[11px] text-red-700 font-semibold leading-relaxed">
+                This will delete the expense record of <strong>AED {fmt(deletingExpense.total_amount)}</strong> and its associated ledger entries.
+                The deleted data will be archived in the Revision Log and can only be restored within 24 hours.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest block">
+                Type <span className="text-red-600">im sure to delete</span> to confirm *
+              </label>
+              <input
+                type="text"
+                placeholder="Type here..."
+                value={deleteConfirmText}
+                onChange={e => setDeleteConfirmText(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
+              />
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setDeletingExpense(null)}
+                className="text-gray-500 hover:text-gray-700 font-bold text-xs transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteExpense}
+                disabled={deleteConfirmText !== 'im sure to delete' || deleting}
+                className={`flex items-center space-x-1.5 px-4 py-2 rounded-lg text-xs font-black transition-all ${
+                  deleteConfirmText === 'im sure to delete' && !deleting
+                    ? 'bg-red-600 hover:bg-red-700 text-white shadow-sm shadow-red-200'
+                    : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                }`}
+              >
+                {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                <span>{deleting ? 'Deleting...' : 'Delete Expense'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

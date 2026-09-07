@@ -85,6 +85,25 @@ const MonthlyReports: React.FC = () => {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingMerchant, setEditingMerchant] = useState<Merchant | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [employees, setEmployees] = useState<any[]>([]);
+
+  useEffect(() => {
+    const fetchEmployees = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('employees')
+          .select('id, full_name')
+          .eq('status', 'active')
+          .order('full_name', { ascending: true });
+        if (!error && data) {
+          setEmployees(data);
+        }
+      } catch (e) {
+        console.error('Failed to load employees:', e);
+      }
+    };
+    fetchEmployees();
+  }, []);
   
   // Ref for the month picker to handle click-outside
   const monthPickerRef = useRef<HTMLDivElement>(null);
@@ -221,6 +240,14 @@ const MonthlyReports: React.FC = () => {
 
   useEffect(() => {
     try {
+      // Clear old mismatched cache keys to prevent loading stale reports
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith('reports_cache_v1_') || key.startsWith('reports_cache_v2_') || key.startsWith('reports_cache_v3_'))) {
+          localStorage.removeItem(key);
+        }
+      }
+
       const rawHistory = localStorage.getItem(CC_HISTORY_KEY);
       if (rawHistory) {
         const parsed = JSON.parse(rawHistory);
@@ -311,7 +338,7 @@ const MonthlyReports: React.FC = () => {
 
   const fetchReports = async (forceRefresh = false) => {
     setLoading(true);
-    const cacheKey = `reports_cache_v2_${selectedGlobalMonths.slice().sort().join('_')}`;
+    const cacheKey = `reports_cache_v4_${selectedGlobalMonths.slice().sort().join('_')}`;
 
     if (!forceRefresh) {
         try {
@@ -360,7 +387,7 @@ const MonthlyReports: React.FC = () => {
           .select(`
             *,
             monthly_reports!inner (report_month),
-            merchants!inner (id, merchant_name, contract_type, revenue_share_percentage, company_name, email, reporting_email, phone, reporting_whatsapp, contact_name, bank_name, bank_account_number, iban, trn, reporting_preference, notes, payment_duration)
+            merchants!inner (id, merchant_name, contract_type, revenue_share_percentage, company_name, email, reporting_email, phone, reporting_whatsapp, contact_name, bank_name, bank_account_number, iban, trn, reporting_preference, notes, payment_duration, reporting_cc, sales_staff_id)
           `)
           .in('monthly_reports.report_month', selectedGlobalMonths)
           .range(from, from + pageSize - 1);
@@ -536,7 +563,7 @@ const MonthlyReports: React.FC = () => {
         setReports(prev => prev.map(r => r.id === reportId ? { ...r, internal_note: note } : r));
         
         // Update cache
-        const cacheKey = `reports_cache_v2_${selectedGlobalMonths.slice().sort().join('_')}`;
+        const cacheKey = `reports_cache_v4_${selectedGlobalMonths.slice().sort().join('_')}`;
         try {
             const cached = localStorage.getItem(cacheKey);
             if (cached) {
@@ -573,7 +600,7 @@ const MonthlyReports: React.FC = () => {
         const updatedReports = prev.map(r => r.id === summaryId ? { ...r, is_paid: !currentStatus } : r);
         
         // Update Local Cache
-        const cacheKey = `reports_cache_v3_${selectedGlobalMonths.slice().sort().join('_')}`;
+        const cacheKey = `reports_cache_v4_${selectedGlobalMonths.slice().sort().join('_')}`;
         try {
             localStorage.setItem(cacheKey, JSON.stringify(updatedReports));
         } catch (e) {
@@ -628,7 +655,9 @@ const MonthlyReports: React.FC = () => {
           merchant_name: editingMerchant.merchant_name,
           trn: editingMerchant.trn,
           reporting_preference: editingMerchant.reporting_preference,
-          notes: editingMerchant.notes
+          notes: editingMerchant.notes,
+          reporting_cc: editingMerchant.reporting_cc || null,
+          sales_staff_id: editingMerchant.sales_staff_id || null
         })
         .eq('id', editingMerchant.id);
 
@@ -702,7 +731,7 @@ const MonthlyReports: React.FC = () => {
         });
 
         // Update Local Cache
-        const cacheKey = `reports_cache_v2_${selectedGlobalMonths.slice().sort().join('_')}`;
+        const cacheKey = `reports_cache_v4_${selectedGlobalMonths.slice().sort().join('_')}`;
         try {
             localStorage.setItem(cacheKey, JSON.stringify(updatedReports));
         } catch (e) {
@@ -896,19 +925,82 @@ const MonthlyReports: React.FC = () => {
     const mInfo = filteredMerchantsList.find(m => m.id === mId);
     if (!mInfo) return null;
 
+    // Fetch company settings for custom branding
+    let customLogoUrl: string | null = null;
+    let customCompanyName = 'Powerpod Sales Report';
+    let customAddress = 'Powerpod Vending, M33 Musaffah, Abu Dhabi, UAE | www.powerpod.ae';
+    try {
+      const { data: compSettings } = await supabase
+        .from('company_settings')
+        .select('*');
+      if (compSettings) {
+        const logoSetting = compSettings.find(s => s.key === 'company_logo_url');
+        if (logoSetting && logoSetting.value) {
+          customLogoUrl = logoSetting.value;
+        }
+        const nameSetting = compSettings.find(s => s.key === 'company_name');
+        if (nameSetting && nameSetting.value) {
+          customCompanyName = nameSetting.value;
+        }
+        const addrSetting = compSettings.find(s => s.key === 'company_address');
+        const phoneSetting = compSettings.find(s => s.key === 'company_phone');
+        const emailSetting = compSettings.find(s => s.key === 'company_email');
+        let parts = [];
+        if (addrSetting?.value) parts.push(addrSetting.value);
+        if (phoneSetting?.value) parts.push(phoneSetting.value);
+        if (emailSetting?.value) parts.push(emailSetting.value);
+        if (parts.length > 0) {
+          customAddress = parts.join(' | ');
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load company details for PDF:', e);
+    }
+
     let logoDataUrl: string | null = null;
     try {
-      // Use local file from public folder to avoid CORS issues
-      const response = await fetch('/logo-white.png');
+      const targetUrl = customLogoUrl || '/logo-white.png';
+      const response = await fetch(targetUrl);
       if (response.ok) {
         const blob = await response.blob();
-        logoDataUrl = await new Promise((resolve) => {
+        // Load into an Image element so we can draw onto a canvas
+        const rawDataUrl = await new Promise<string>((resolve) => {
           const reader = new FileReader();
           reader.onloadend = () => resolve(reader.result as string);
           reader.readAsDataURL(blob);
         });
+
+        if (customLogoUrl) {
+          // For custom logos: strip white/near-white background using canvas
+          logoDataUrl = await new Promise<string>((resolve) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              canvas.width = img.naturalWidth;
+              canvas.height = img.naturalHeight;
+              const ctx = canvas.getContext('2d')!;
+              ctx.drawImage(img, 0, 0);
+              const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const d = imageData.data;
+              for (let i = 0; i < d.length; i += 4) {
+                const r = d[i], g = d[i + 1], b = d[i + 2];
+                // Make near-white pixels transparent (threshold 230)
+                if (r > 230 && g > 230 && b > 230) {
+                  d[i + 3] = 0;
+                }
+              }
+              ctx.putImageData(imageData, 0, 0);
+              resolve(canvas.toDataURL('image/png'));
+            };
+            img.onerror = () => resolve(rawDataUrl); // fallback
+            img.src = rawDataUrl;
+          });
+        } else {
+          logoDataUrl = rawDataUrl;
+        }
       } else {
-        console.warn('Failed to load local logo, status:', response.status);
+        console.warn('Failed to load logo, status:', response.status);
       }
     } catch (e) {
       console.warn('Failed to load logo:', e);
@@ -921,16 +1013,42 @@ const MonthlyReports: React.FC = () => {
     const summaryIds = relevantReports.map(r => r.id);
     
     let allTransactions: any[] = [];
-    const BATCH_SIZE = 50;
-    for (let i = 0; i < summaryIds.length; i += BATCH_SIZE) {
-        const batch = summaryIds.slice(i, i + BATCH_SIZE);
-        const { data } = await supabase
-          .from('sales_transactions')
-          .select('*')
-          .in('summary_id', batch)
-          .limit(5000);
-        
-        if (data) allTransactions = [...allTransactions, ...data];
+    const TX_BATCH_SIZE = 50; // number of summary IDs per query
+    const PAGE_SIZE = 1000;   // rows per page (respects PostgREST max_rows)
+    for (let i = 0; i < summaryIds.length; i += TX_BATCH_SIZE) {
+        const batch = summaryIds.slice(i, i + TX_BATCH_SIZE);
+        // Paginate through all rows to avoid server-side row limits
+        let from = 0;
+        let fetchMore = true;
+        while (fetchMore) {
+            const { data, error } = await supabase
+              .from('sales_transactions')
+              .select('*')
+              .in('summary_id', batch)
+              .range(from, from + PAGE_SIZE - 1);
+            
+            if (error) {
+                console.error('PDF tx fetch error:', error);
+                fetchMore = false;
+            } else if (data && data.length > 0) {
+                allTransactions = [...allTransactions, ...data];
+                if (data.length < PAGE_SIZE) {
+                    fetchMore = false;
+                } else {
+                    from += PAGE_SIZE;
+                }
+            } else {
+                fetchMore = false;
+            }
+        }
+    }
+
+    // Fallback: if fresh fetch returned nothing, use the in-memory cache
+    if (allTransactions.length === 0 && summaryIds.length > 0) {
+        summaryIds.forEach(sid => {
+            const cached = transactionCache.get(sid);
+            if (cached) allTransactions = [...allTransactions, ...cached];
+        });
     }
 
     const transactions = allTransactions
@@ -967,6 +1085,7 @@ const MonthlyReports: React.FC = () => {
       // Logo
       if (logoDataUrl) {
         try {
+          // Render logo directly on the dark header — no white background border
           doc.addImage(logoDataUrl, 'PNG', 15, 10, 30, 20);
         } catch (e) {
           console.error('Error adding logo to PDF:', e);
@@ -977,12 +1096,12 @@ const MonthlyReports: React.FC = () => {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(22);
       doc.setTextColor(colorWhite[0], colorWhite[1], colorWhite[2]);
-      doc.text('Powerpod Sales Report', pageWidth / 2, 18, { align: 'center' });
+      doc.text(customCompanyName, pageWidth / 2, 18, { align: 'center' });
 
       // Sub-Header Address
       doc.setFontSize(9);
       doc.setFont('helvetica', 'normal');
-      doc.text('Powerpod Vending, M33 Musaffah, Abu Dhabi, UAE | www.powerpod.ae', pageWidth / 2, 28, { align: 'center' });
+      doc.text(customAddress, pageWidth / 2, 28, { align: 'center' });
     };
 
     const drawFooter = (pageNum: number, totalPages: number) => {
@@ -1193,43 +1312,51 @@ const MonthlyReports: React.FC = () => {
 
         // Filter transactions for this report
         const reportTxs = (transactions || []).filter(t => t.summary_id === report.id);
+        const hasTransactions = reportTxs.length > 0;
 
         // A. Sales by Venue & Station
         doc.setFontSize(11);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(0, 0, 0);
         doc.text('A. Sales by Venue & Station', 15, currentY);
         currentY += 5;
 
-        // Group by Venue -> Station
-        const venueMap = new Map<string, Map<string, number>>();
-        reportTxs.forEach(tx => {
-            const vName = tx.venue_name || 'Unknown Venue';
-            const sName = tx.station_name || 'Unknown Station';
-            if (!venueMap.has(vName)) venueMap.set(vName, new Map());
-            const sMap = venueMap.get(vName)!;
-            
-            // Calculate Net Sales for Payout per transaction
-            const net = n(tx.amount) - n(tx.stripe_fee) - n(tx.tax_fee);
-            sMap.set(sName, (sMap.get(sName) || 0) + net);
-        });
-
-        const venueRows: any[] = [];
-        venueMap.forEach((sMap, vName) => {
-            sMap.forEach((amount, sName) => {
-                venueRows.push([vName, sName, `AED ${f(amount)}`]);
+        if (!hasTransactions) {
+            doc.setFontSize(9);
+            doc.setFont('helvetica', 'italic');
+            doc.setTextColor(150, 150, 150);
+            doc.text('No transaction-level data available for this period. Please re-sync via Data Processor.', 15, currentY + 5);
+            currentY += 15;
+        } else {
+            // Group by Venue -> Station
+            const venueMap = new Map<string, Map<string, number>>();
+            reportTxs.forEach(tx => {
+                const vName = tx.venue_name || 'Unknown Venue';
+                const sName = tx.station_name || 'Unknown Station';
+                if (!venueMap.has(vName)) venueMap.set(vName, new Map());
+                const sMap = venueMap.get(vName)!;
+                const net = n(tx.amount) - n(tx.stripe_fee) - n(tx.tax_fee);
+                sMap.set(sName, (sMap.get(sName) || 0) + net);
             });
-        });
 
-        // @ts-ignore
-        doc.autoTable({
-            startY: currentY,
-            head: [['Venue', 'Station', 'Net Sales for Payout']],
-            body: venueRows,
-            theme: 'grid',
-            headStyles: { fillColor: [220, 220, 220], textColor: 0, fontStyle: 'bold' },
-            styles: { fontSize: 8, cellPadding: 2 }
-        });
+            const venueRows: any[] = [];
+            venueMap.forEach((sMap, vName) => {
+                sMap.forEach((amount, sName) => {
+                    venueRows.push([vName, sName, `AED ${f(amount)}`]);
+                });
+            });
 
-        currentY = (doc as any).lastAutoTable.finalY + 10;
+            // @ts-ignore
+            doc.autoTable({
+                startY: currentY,
+                head: [['Venue', 'Station', 'Net Sales for Payout']],
+                body: venueRows,
+                theme: 'grid',
+                headStyles: { fillColor: [220, 220, 220], textColor: 0, fontStyle: 'bold' },
+                styles: { fontSize: 8, cellPadding: 2 }
+            });
+            currentY = (doc as any).lastAutoTable.finalY + 10;
+        }
 
         // B. Transaction Log
         if (currentY > pageHeight - 40) {
@@ -1240,33 +1367,41 @@ const MonthlyReports: React.FC = () => {
 
         doc.setFontSize(11);
         doc.setFont('helvetica', 'bold');
+        doc.setTextColor(0, 0, 0);
         doc.text('B. Transaction Log (All Orders)', 15, currentY);
         currentY += 5;
 
-        const txRows = reportTxs.map(tx => {
-            const net = n(tx.amount) - n(tx.stripe_fee) - n(tx.tax_fee);
-            return [
-                tx.order_id,
-                tx.station_name,
-                tx.transaction_date,
-                f(tx.amount),
-                f(tx.stripe_fee),
-                f(tx.tax_fee),
-                f(net),
-                'Completed'
-            ];
-        });
-
-        // @ts-ignore
-        doc.autoTable({
-            startY: currentY,
-            head: [['Order ID', 'Station', 'Rental Time', 'Total', 'Stripe', 'Tax', 'Net', 'Status']],
-            body: txRows,
-            theme: 'striped',
-            headStyles: { fillColor: [50, 50, 50], textColor: 255 },
-            styles: { fontSize: 6, cellPadding: 1.5 },
-            alternateRowStyles: { fillColor: [245, 245, 245] }
-        });
+        if (!hasTransactions) {
+            doc.setFontSize(9);
+            doc.setFont('helvetica', 'italic');
+            doc.setTextColor(150, 150, 150);
+            doc.text('No individual transaction records found. Re-sync data via Data Processor to populate.', 15, currentY + 5);
+            currentY += 15;
+        } else {
+            const txRows = reportTxs.map(tx => {
+                const net = n(tx.amount) - n(tx.stripe_fee) - n(tx.tax_fee);
+                return [
+                    tx.order_id || '—',
+                    tx.station_name || '—',
+                    tx.transaction_date || '—',
+                    `AED ${f(tx.amount)}`,
+                    `AED ${f(tx.stripe_fee)}`,
+                    `AED ${f(tx.tax_fee)}`,
+                    `AED ${f(net)}`,
+                    'Completed'
+                ];
+            });
+            // @ts-ignore
+            doc.autoTable({
+                startY: currentY,
+                head: [['Order ID', 'Station', 'Rental Time', 'Total', 'Stripe', 'Tax', 'Net', 'Status']],
+                body: txRows,
+                theme: 'striped',
+                headStyles: { fillColor: [50, 50, 50], textColor: 255 },
+                styles: { fontSize: 6, cellPadding: 1.5 },
+                alternateRowStyles: { fillColor: [245, 245, 245] }
+            });
+        }
     }
 
     // Add Page Numbers
@@ -1312,7 +1447,7 @@ const MonthlyReports: React.FC = () => {
       merchantId: mId,
       merchantName: mInfo.name,
       to: mInfo.merchant.reporting_email || mInfo.merchant.email || '',
-      cc: buildCc(mInfo.merchant.email || '', savedCcExtra),
+      cc: mInfo.merchant.reporting_cc !== undefined && mInfo.merchant.reporting_cc !== null ? mInfo.merchant.reporting_cc : buildCc(mInfo.merchant.email || '', savedCcExtra),
       bcc: savedBccExtra,
       subject: 'Powerpod Sales Report',
       phone: mInfo.merchant.reporting_whatsapp || mInfo.merchant.phone || '',
@@ -1369,7 +1504,7 @@ const MonthlyReports: React.FC = () => {
             );
 
             // Update Local Cache
-            const cacheKey = `reports_cache_v2_${selectedGlobalMonths.slice().sort().join('_')}`;
+            const cacheKey = `reports_cache_v4_${selectedGlobalMonths.slice().sort().join('_')}`;
             try {
                 localStorage.setItem(cacheKey, JSON.stringify(updatedReports));
             } catch (e) {
@@ -1501,7 +1636,7 @@ const MonthlyReports: React.FC = () => {
       }
 
       // Update merchant email if changed
-      if (draft.to && draft.to !== mInfo.merchant.email) {
+      if (draft.to && draft.to !== mInfo.merchant.reporting_email) {
         setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'Updating merchant email record...'] }));
         const { error: updateError } = await supabase
             .from('merchants')
@@ -1519,7 +1654,7 @@ const MonthlyReports: React.FC = () => {
                 });
 
                 // Update Local Cache
-                const cacheKey = `reports_cache_v3_${selectedGlobalMonths.slice().sort().join('_')}`;
+                const cacheKey = `reports_cache_v4_${selectedGlobalMonths.slice().sort().join('_')}`;
                 try {
                     localStorage.setItem(cacheKey, JSON.stringify(updatedReports));
                 } catch (e) {
@@ -1530,6 +1665,39 @@ const MonthlyReports: React.FC = () => {
             });
         } else {
             console.warn("Failed to update merchant email:", updateError);
+        }
+      }
+
+      // Update merchant CC if changed
+      if (draft.cc !== undefined && draft.cc !== mInfo.merchant.reporting_cc) {
+        setDispatchStatus(prev => ({ ...prev!, logs: [...prev!.logs, 'Updating merchant CC record...'] }));
+        const { error: ccUpdateError } = await supabase
+            .from('merchants')
+            .update({ reporting_cc: draft.cc })
+            .eq('id', draft.merchantId);
+        
+        if (!ccUpdateError) {
+            // Update local state
+            setReports(prev => {
+                const updatedReports = prev.map(r => {
+                    if (r.merchants.id === draft.merchantId) {
+                        return { ...r, merchants: { ...r.merchants, reporting_cc: draft.cc } };
+                    }
+                    return r;
+                });
+
+                // Update Local Cache
+                const cacheKey = `reports_cache_v4_${selectedGlobalMonths.slice().sort().join('_')}`;
+                try {
+                    localStorage.setItem(cacheKey, JSON.stringify(updatedReports));
+                } catch (e) {
+                    console.warn("Failed to update cache", e);
+                }
+
+                return updatedReports;
+            });
+        } else {
+            console.warn("Failed to update merchant CC:", ccUpdateError);
         }
       }
 
@@ -2850,6 +3018,29 @@ const MonthlyReports: React.FC = () => {
                             value={editingMerchant.reporting_whatsapp || ''}
                             onChange={(e) => setEditingMerchant({...editingMerchant, reporting_whatsapp: e.target.value})}
                           />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Reporting CC (Emails)</label>
+                          <input 
+                            type="text"
+                            placeholder="comma separated"
+                            className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                            value={editingMerchant.reporting_cc || ''}
+                            onChange={(e) => setEditingMerchant({...editingMerchant, reporting_cc: e.target.value})}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Assigned Sales / Staff</label>
+                          <select 
+                            className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                            value={editingMerchant.sales_staff_id || ''}
+                            onChange={(e) => setEditingMerchant({...editingMerchant, sales_staff_id: e.target.value || null})}
+                          >
+                            <option value="">No Staff Assigned</option>
+                            {employees.map(emp => (
+                              <option key={emp.id} value={emp.id}>{emp.full_name}</option>
+                            ))}
+                          </select>
                         </div>
                       </div>
                       <div className="space-y-2">

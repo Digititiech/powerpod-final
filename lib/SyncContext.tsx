@@ -179,6 +179,18 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           monthlyTax += taxAmount;
           monthlyPayable += payable;
 
+          // Query existing summary to preserve user-modified attributes like is_paid, internal_note, remittance_note
+          const { data: existingSummary } = await supabase
+            .from('merchant_period_summaries')
+            .select('is_paid, internal_note, remittance_note')
+            .eq('report_id', reportData.id)
+            .eq('merchant_id', merchant.id)
+            .maybeSingle();
+
+          const isPaidStatus = existingSummary ? existingSummary.is_paid : false;
+          const internalNoteVal = existingSummary ? existingSummary.internal_note : null;
+          const remittanceNoteVal = existingSummary ? existingSummary.remittance_note : null;
+
           // Upsert Merchant Period Summary
           const { data: summary, error: sErr } = await supabase
             .from('merchant_period_summaries')
@@ -191,7 +203,9 @@ export const SyncProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
               tax_amount: taxAmount,
               net_profit: netSales,
               merchant_payable: payable,
-              is_paid: false
+              is_paid: isPaidStatus,
+              internal_note: internalNoteVal,
+              remittance_note: remittanceNoteVal
             }, { onConflict: 'report_id, merchant_id' })
             .select().single();
 

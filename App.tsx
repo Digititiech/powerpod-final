@@ -38,6 +38,7 @@ import AccountingHelp from './views/AccountingHelp';
 import FinanceHub from './views/FinanceHub';
 import CompanySettings from './views/CompanySettings';
 import { supabase } from './lib/supabase';
+import { isExtensionOrNoiseError } from './lib/ErrorBoundary';
 import { SyncProvider, useSync } from './lib/SyncContext';
 import { FeatureKey, Profile, View } from './types';
 import { AccessControlProvider } from './lib/AccessControlContext';
@@ -130,10 +131,18 @@ const AppContent: React.FC = () => {
 
   useEffect(() => {
     const onError = (event: ErrorEvent) => {
+      if (isExtensionOrNoiseError(event.error || event.message)) {
+        event.preventDefault();
+        return;
+      }
       console.error('Client error', event.error ?? event.message);
     };
 
     const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      if (isExtensionOrNoiseError(event.reason)) {
+        event.preventDefault();
+        return;
+      }
       console.error('Unhandled promise rejection', event.reason);
     };
 

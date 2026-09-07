@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   Upload, Receipt, CreditCard, BarChart2, Building2,
-  Users, ArrowUpRight, ArrowDownLeft, Wallet, Percent, FileCheck2
+  Users, ArrowUpRight, ArrowDownLeft, Wallet, Percent, FileCheck2, FileText
 } from 'lucide-react';
 import IncomeUpload from './finance/IncomeUpload';
 import ExpenseForm from './finance/ExpenseForm';
@@ -10,10 +10,11 @@ import LoanManager from './finance/LoanManager';
 import BankReconciliation from './finance/BankReconciliation';
 import TaxReport from './finance/TaxReport';
 import TaxClearance from './finance/TaxClearance';
+import InvoicesQuotations from './finance/InvoicesQuotations';
 import { useAccessControl } from '../lib/AccessControlContext';
 import { FeatureKey } from '../types';
 
-type FinanceTab = 'income' | 'expenses' | 'treasury' | 'loans' | 'reconciliation' | 'tax-report' | 'tax-clearance';
+type FinanceTab = 'income' | 'expenses' | 'treasury' | 'loans' | 'reconciliation' | 'tax-report' | 'tax-clearance' | 'invoices';
 
 const FinanceHub: React.FC = () => {
   const { hasFeature } = useAccessControl();
@@ -35,6 +36,14 @@ const FinanceHub: React.FC = () => {
       feature: 'finance.expense.create',
       color: 'orange',
       desc: 'Record bills & supplier payments',
+    },
+    {
+      id: 'invoices',
+      label: 'Invoices',
+      icon: <FileText size={18} />,
+      feature: 'finance.invoices.manage',
+      color: 'blue',
+      desc: 'Invoices & Quotations billing',
     },
     {
       id: 'treasury',
@@ -111,7 +120,7 @@ const FinanceHub: React.FC = () => {
         </p>
 
         {/* Quick stat cards */}
-        <div className="grid grid-cols-7 gap-3 mt-5">
+        <div className="grid grid-cols-4 lg:grid-cols-8 gap-3 mt-5">
           {allowedTabs.map(t => {
             const isActive = activeTab === t.id;
             return (
@@ -137,6 +146,7 @@ const FinanceHub: React.FC = () => {
       <div>
         {activeTab === 'income'         && hasFeature('finance.income.upload')     && <IncomeUpload />}
         {activeTab === 'expenses'       && hasFeature('finance.expense.create')     && <ExpenseForm />}
+        {activeTab === 'invoices'       && hasFeature('finance.invoices.manage')    && <InvoicesQuotations />}
         {activeTab === 'treasury'       && hasFeature('finance.treasury.create')    && <TreasuryVouchers />}
         {activeTab === 'loans'          && hasFeature('finance.loans.manage')       && <LoanManager />}
         {activeTab === 'reconciliation' && hasFeature('finance.reconciliation.run') && <BankReconciliation />}

@@ -39,6 +39,7 @@ export type FeatureKey =
   | 'nav.finance-hub'
   | 'nav.company-settings'
   | 'ledger.journal.write'
+  | 'ledger.journal.delete'
   | 'ledger.period.lock'
   // Finance Hub modules
   | 'finance.income.upload'
@@ -46,6 +47,7 @@ export type FeatureKey =
   | 'finance.treasury.create'
   | 'finance.loans.manage'
   | 'finance.reconciliation.run'
+  | 'finance.invoices.manage'
   | 'finance.payroll.approve'
   | 'finance.tax.view'
   | 'finance.tax.clear';
@@ -81,6 +83,8 @@ export interface Merchant {
   payment_duration?: string;
   notes?: string;
   status?: string;
+  reporting_cc?: string;
+  sales_staff_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -262,6 +266,7 @@ export interface Employee {
   bank_account_number: string;
   iban: string;
   cost_center_id?: string | null;
+  sales_percentage?: number;
   created_at: string;
   updated_at: string;
 }
@@ -393,6 +398,9 @@ export interface BankLoan {
   account_code: string;
   status: 'active' | 'settled' | 'written_off';
   notes?: string | null;
+  interest_type?: 'flat' | 'decreasing' | null;
+  payment_frequency?: 'monthly' | 'quarterly' | 'other' | null;
+  period_months?: number | null;
   created_at: string;
 }
 

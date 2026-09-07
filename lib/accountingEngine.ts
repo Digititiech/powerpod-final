@@ -297,6 +297,63 @@ export async function postLoanRepayment(params: {
   });
 }
 
+// ─── 6. Invoice Entry ─────────────────────────────────────────────────────────
+/**
+ * Dr 1100 Accounts Receivable ← totalAmount
+ * Cr 2200 VAT Output Tax      ← vatAmount (if any)
+ * Cr 4000 Sales Revenue       ← subtotal
+ */
+export async function postInvoiceEntry(params: {
+  invoiceDate: string;
+  customerName: string;
+  subtotal: number;
+  vatAmount: number;
+  totalAmount: number;
+  invoiceNumber: string;
+}): Promise<string> {
+  const acm = await getAccountMap();
+  const { invoiceDate, customerName, subtotal, vatAmount, totalAmount, invoiceNumber } = params;
+
+  const lines: JELine[] = [
+    {
+      account_id: resolveAccount(acm, '1100'),
+      description: `Accounts Receivable — ${customerName} (Inv #${invoiceNumber})`,
+      debit: totalAmount,
+      credit: 0,
+    },
+  ];
+
+  if (vatAmount > 0) {
+    const vatAccId = acm.get('2200') || acm.get('2000');
+    if (vatAccId) {
+      lines.push({
+        account_id: vatAccId,
+        description: `VAT Output Tax (5%) — ${customerName}`,
+        debit: 0,
+        credit: vatAmount,
+      });
+    }
+  }
+
+  const revAccId = acm.get('4000') || acm.get('4100') || acm.get('4900');
+  if (revAccId) {
+    lines.push({
+      account_id: revAccId,
+      description: `Sales Revenue — ${customerName}`,
+      debit: 0,
+      credit: subtotal,
+    });
+  }
+
+  return postJournalEntry({
+    entryDate: invoiceDate,
+    refPrefix: 'INV',
+    description: `Invoice #${invoiceNumber} for ${customerName}`,
+    lines,
+    entryType: 'other',
+  });
+}
+
 // ─── Reset cache (for testing) ────────────────────────────────────────────────
 export function resetAccountCache(): void {
   _accountMap = null;

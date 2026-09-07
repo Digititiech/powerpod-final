@@ -14,7 +14,13 @@ import {
   PlusCircle,
   Paperclip,
   Tag,
-  Activity
+  Activity,
+  Trash2,
+  RotateCcw,
+  Clock,
+  AlertTriangle,
+  ChevronRight,
+  Undo
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Account, JournalEntry, JournalItem } from '../types';
@@ -22,8 +28,8 @@ import { useAccessControl } from '../lib/AccessControlContext';
 import ComplexJournalEntryForm from './ComplexJournalEntryForm';
 
 const Ledger: React.FC = () => {
-  const { hasFeature } = useAccessControl();
-  const [activeTab, setActiveTab] = useState<'journal' | 'trial' | 'pnl' | 'balance' | 'adjusting'>('journal');
+  const { hasFeature, profile } = useAccessControl();
+  const [activeTab, setActiveTab] = useState<'journal' | 'trial' | 'pnl' | 'balance' | 'adjusting' | 'deleted-logs'>('journal');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showJVForm, setShowJVForm] = useState(false);
@@ -32,6 +38,18 @@ const Ledger: React.FC = () => {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [journalEntries, setJournalEntries] = useState<any[]>([]);
   const [trialBalances, setTrialBalances] = useState<any[]>([]);
+
+  // Deleted Entries Logs data
+  const [deletedLogs, setDeletedLogs] = useState<any[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
+  const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
+  const [restoringLogId, setRestoringLogId] = useState<string | null>(null);
+
+  // Deletion Confirmation State
+  const [deletingEntry, setDeletingEntry] = useState<any | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
 
   // Search/Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -124,6 +142,74 @@ const Ledger: React.FC = () => {
       setLoading(false);
     }
   };
+
+  const fetchDeletedLogs = async () => {
+    setLogsLoading(true);
+    setLogsError(null);
+    try {
+      const { data, error: err } = await supabase
+        .from('deleted_journal_entries_log')
+        .select(`
+          *,
+          profiles:deleted_by (
+            full_name,
+            email
+          )
+        `)
+        .order('deleted_at', { ascending: false });
+
+      if (err) throw err;
+      setDeletedLogs(data || []);
+    } catch (err: any) {
+      setLogsError(err.message || 'Failed to fetch revision logs');
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+
+  const handleDeleteEntry = async () => {
+    if (!deletingEntry) return;
+    setDeleting(true);
+    try {
+      const { error: err } = await supabase.rpc('delete_journal_entry_with_log', {
+        p_entry_id: deletingEntry.id
+      });
+      if (err) throw err;
+      
+      setDeletingEntry(null);
+      fetchLedgerData();
+      if (activeTab === 'deleted-logs') {
+        fetchDeletedLogs();
+      }
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete journal entry.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleRestoreEntry = async (logId: string) => {
+    setRestoringLogId(logId);
+    try {
+      const { error: err } = await supabase.rpc('restore_journal_entry', {
+        p_log_id: logId
+      });
+      if (err) throw err;
+      
+      fetchLedgerData();
+      fetchDeletedLogs();
+    } catch (err: any) {
+      alert(err.message || 'Failed to restore journal entry.');
+    } finally {
+      setRestoringLogId(null);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'deleted-logs') {
+      fetchDeletedLogs();
+    }
+  }, [activeTab]);
 
   const filteredEntries = journalEntries.filter(entry => {
     const matchesSearch = 
@@ -233,6 +319,19 @@ const Ledger: React.FC = () => {
           <FileText size={16} />
           <span>Balance Sheet</span>
         </button>
+        {hasFeature('ledger.journal.delete') && (
+          <button
+            onClick={() => setActiveTab('deleted-logs')}
+            className={`flex items-center space-x-2 px-4 py-2 text-sm font-bold border-b-2 transition duration-150 ${
+              activeTab === 'deleted-logs' 
+                ? 'border-red-600 text-red-600' 
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <Activity size={16} />
+            <span>Revision Log</span>
+          </button>
+        )}
       </div>
 
       {error && (
@@ -340,6 +439,18 @@ const Ledger: React.FC = () => {
                             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-red-100 text-red-700">
                               🔒 Locked
                             </span>
+                          )}
+                          {hasFeature('ledger.journal.delete') && !entry.period_locked && (
+                            <button
+                              onClick={() => {
+                                setDeletingEntry(entry);
+                                setDeleteConfirmText('');
+                              }}
+                              className="inline-flex items-center text-gray-400 hover:text-red-600 transition-colors p-1 rounded hover:bg-gray-100/80"
+                              title="Delete Journal Entry"
+                            >
+                              <Trash2 size={13} />
+                            </button>
                           )}
                         </div>
                       </div>
@@ -559,6 +670,298 @@ const Ledger: React.FC = () => {
               </div>
             </div>
           )}
+
+          {/* TAB 5: REVISION LOG */}
+          {activeTab === 'deleted-logs' && (
+            <div className="space-y-4">
+              <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                <div>
+                  <h2 className="text-xs font-black text-gray-400 uppercase tracking-widest">Deleted Entries Revision Log</h2>
+                  <p className="text-xs text-gray-500 font-semibold mt-0.5">
+                    Review and restore deleted journal entries. Entries are available for restoration for 24 hours post-deletion.
+                  </p>
+                </div>
+                <button
+                  onClick={fetchDeletedLogs}
+                  disabled={logsLoading}
+                  className="flex items-center space-x-1.5 px-3 py-1.5 bg-gray-50 hover:bg-gray-100 border border-gray-200 text-gray-700 rounded-lg text-xs font-bold transition-all"
+                >
+                  <Activity size={12} className={logsLoading ? 'animate-spin' : ''} />
+                  <span>Refresh Log</span>
+                </button>
+              </div>
+
+              {logsError && (
+                <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 flex items-center space-x-2 text-sm">
+                  <AlertCircle size={16} />
+                  <span className="font-bold">{logsError}</span>
+                </div>
+              )}
+
+              {logsLoading ? (
+                <div className="flex flex-col items-center justify-center p-12 bg-white rounded-xl border border-gray-200 shadow-sm">
+                  <Loader2 size={24} className="text-blue-500 animate-spin mb-2" />
+                  <p className="text-gray-500 text-xs font-bold">Querying deletion logs...</p>
+                </div>
+              ) : deletedLogs.length === 0 ? (
+                <div className="text-center p-12 bg-white rounded-xl border border-gray-200 shadow-sm text-gray-500 font-bold">
+                  No deleted entries logged.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {deletedLogs.map((log: any) => {
+                    const deletedAt = new Date(log.deleted_at);
+                    const now = new Date();
+                    const diffMs = now.getTime() - deletedAt.getTime();
+                    const hoursPassed = diffMs / (1000 * 60 * 60);
+                    const isExpired = hoursPassed >= 24;
+                    
+                    // Time remaining format
+                    let remainingStr = '';
+                    if (!isExpired) {
+                      const totalSecondsRemaining = Math.max(0, Math.floor((24 * 60 * 60 * 1000 - diffMs) / 1000));
+                      const hrs = Math.floor(totalSecondsRemaining / 3600);
+                      const mins = Math.floor((totalSecondsRemaining % 3600) / 60);
+                      remainingStr = `${hrs}h ${mins}m remaining`;
+                    } else {
+                      remainingStr = 'Expired';
+                    }
+
+                    const entry = log.entry_data || {};
+                    const items = log.items_data || [];
+                    const isExpanded = !!expandedLogs[log.id];
+
+                    const entityType = log.relations_data?.entity_type || 'journal_entry';
+                    
+                    let typeBadge = '';
+                    let typeClass = '';
+                    let titleText = '';
+                    let subtitleText = '';
+                    let detailsLabel = '';
+
+                    if (entityType === 'journal_entry') {
+                      typeBadge = 'Journal Entry';
+                      typeClass = 'bg-blue-50 text-blue-700 border-blue-200';
+                      titleText = entry.reference_number || 'JV-UNASSIGNED';
+                      subtitleText = entry.description || 'No narration provided';
+                    } else if (entityType === 'expense') {
+                      const expData = log.relations_data?.expense_data || {};
+                      typeBadge = 'Expense';
+                      typeClass = 'bg-orange-50 text-orange-700 border-orange-200';
+                      titleText = `EXPENSE - ${expData.supplier_name || 'Unknown supplier'}`;
+                      subtitleText = expData.notes ? `Notes: ${expData.notes}` : 'No notes provided';
+                      detailsLabel = `Amount: AED ${Number(expData.total_amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })} · Date: ${expData.expense_date}`;
+                    } else if (entityType === 'treasury_voucher') {
+                      const tvData = log.relations_data?.voucher_data || {};
+                      const isReceipt = tvData.voucher_type === 'receipt';
+                      typeBadge = isReceipt ? 'Receipt Voucher' : 'Payment Voucher';
+                      typeClass = isReceipt ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200';
+                      titleText = `${isReceipt ? 'RECEIPT' : 'PAYMENT'} VOUCHER - ${tvData.party_name || 'N/A'}`;
+                      subtitleText = `Purpose: ${tvData.purpose?.replace('_', ' ')}${tvData.notes ? ` · Notes: ${tvData.notes}` : ''}`;
+                      detailsLabel = `Amount: AED ${Number(tvData.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })} · Date: ${tvData.voucher_date}`;
+                    } else if (entityType === 'monthly_income') {
+                      typeBadge = 'Monthly Income';
+                      typeClass = 'bg-purple-50 text-purple-700 border-purple-200';
+                      titleText = `INCOME REPORT - ${log.relations_data?.report_month || 'N/A'}`;
+                      subtitleText = 'Consolidated monthly merchant sales & share allocation';
+                    } else if (entityType === 'payroll_run') {
+                      const prData = log.relations_data?.payroll_run_data || {};
+                      typeBadge = 'Payroll Run';
+                      typeClass = 'bg-teal-50 text-teal-700 border-teal-200';
+                      titleText = `PAYROLL - ${prData.payroll_month || 'N/A'}`;
+                      subtitleText = `Gross Compensation: AED ${Number(prData.total_gross || 0).toLocaleString()} · Net Salary Disbursed: AED ${Number(prData.total_net || 0).toLocaleString()}`;
+                    }
+
+                    return (
+                      <div key={log.id} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                        <div className="px-6 py-4 bg-gray-50/50 border-b border-gray-100 flex justify-between items-center text-xs">
+                          <div className="flex items-center space-x-3">
+                            <span className={`inline-flex px-2 py-0.5 rounded-full text-[9px] font-black uppercase border ${typeClass}`}>
+                              {typeBadge}
+                            </span>
+                            <span className="font-black text-gray-900">{titleText}</span>
+                            {entry.entry_date && (
+                              <>
+                                <span className="text-gray-400 font-bold">|</span>
+                                <div className="flex items-center space-x-1 text-gray-500 font-semibold">
+                                  <Calendar size={12} />
+                                  <span>Date: {entry.entry_date}</span>
+                                </div>
+                              </>
+                            )}
+                            <span className="text-gray-400 font-bold">|</span>
+                            <div className="flex items-center space-x-1 text-gray-500 font-semibold">
+                              <Clock size={12} />
+                              <span>Deleted: {deletedAt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                            </div>
+                            <span className="text-gray-400 font-bold">|</span>
+                            <div className="text-gray-600 font-bold">
+                              By: {log.profiles?.full_name || 'System / Unknown'}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center space-x-3">
+                            <span className={`inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                              isExpired 
+                                ? 'bg-red-50 text-red-600 border border-red-200' 
+                                : 'bg-green-50 text-green-700 border border-green-200 animate-pulse'
+                            }`}>
+                              {remainingStr}
+                            </span>
+
+                            <button
+                              onClick={() => handleRestoreEntry(log.id)}
+                              disabled={isExpired || restoringLogId !== null}
+                              className={`flex items-center space-x-1 px-3 py-1 rounded-lg text-xs font-black transition-all ${
+                                !isExpired && restoringLogId === null
+                                  ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm shadow-blue-200'
+                                  : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                              }`}
+                              title={isExpired ? 'Restoration window expired (24h limit)' : 'Undelete & Restore Entry'}
+                            >
+                              {restoringLogId === log.id ? (
+                                <Loader2 size={12} className="animate-spin" />
+                              ) : (
+                                <Undo size={12} />
+                              )}
+                              <span>Restore</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Narration / Details */}
+                        <div className="p-4 bg-gray-50/20 border-b border-gray-100 flex justify-between items-center">
+                          <div className="space-y-0.5">
+                            <p className="text-xs font-semibold text-gray-600">
+                              <span className="text-gray-400 font-black uppercase text-[10px] mr-2">Narration:</span>
+                              {subtitleText}
+                            </p>
+                            {detailsLabel && (
+                              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                                {detailsLabel}
+                              </p>
+                            )}
+                          </div>
+                          {items && items.length > 0 && (
+                            <button
+                              onClick={() => setExpandedLogs(prev => ({ ...prev, [log.id]: !isExpanded }))}
+                              className="flex items-center space-x-1 text-xs font-bold text-gray-500 hover:text-gray-700 transition-colors"
+                            >
+                              <span>{isExpanded ? 'Hide Lines' : 'View lines'}</span>
+                              <ChevronRight size={14} className={`transform transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Collapsible Lines Table */}
+                        {isExpanded && (
+                          <table className="min-w-full text-xs font-semibold border-t border-gray-100">
+                            <thead className="bg-gray-50 text-[10px] font-black text-gray-400 uppercase tracking-wider border-b border-gray-100">
+                              <tr>
+                                <th className="px-6 py-2 text-left">Account</th>
+                                <th className="px-6 py-2 text-left">Description</th>
+                                <th className="px-6 py-2 text-right">Debit (AED)</th>
+                                <th className="px-6 py-2 text-right">Credit (AED)</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100 text-gray-700 bg-white">
+                              {items.map((item: any, idx: number) => {
+                                const account = accounts.find(a => a.id === item.account_id);
+                                return (
+                                  <tr key={item.id || idx}>
+                                    <td className="px-6 py-2.5">
+                                      {account ? (
+                                        <>
+                                          <span className="font-mono text-[10px] font-black text-gray-400 bg-gray-100 px-1 rounded mr-2">
+                                            {account.code}
+                                          </span>
+                                          <span className="font-bold text-gray-900">{account.name}</span>
+                                        </>
+                                      ) : (
+                                        <span className="font-mono text-gray-400">{item.account_id}</span>
+                                      )}
+                                    </td>
+                                    <td className="px-6 py-2.5 text-gray-500">{item.description}</td>
+                                    <td className="px-6 py-2.5 text-right font-black text-gray-900">
+                                      {Number(item.debit) > 0 ? Number(item.debit).toLocaleString('en-US', { minimumFractionDigits: 2 }) : '-'}
+                                    </td>
+                                    <td className="px-6 py-2.5 text-right font-black text-gray-900">
+                                      {Number(item.credit) > 0 ? Number(item.credit).toLocaleString('en-US', { minimumFractionDigits: 2 }) : '-'}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deletingEntry && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 p-6 space-y-4">
+            <div className="flex items-center space-x-3 text-red-600">
+              <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center">
+                <AlertTriangle size={20} />
+              </div>
+              <div>
+                <h3 className="text-gray-900 font-black text-sm">Confirm Entry Deletion</h3>
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
+                  Reference: {deletingEntry.reference_number || 'JV-UNASSIGNED'}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-red-50/50 border border-red-100 rounded-xl space-y-1">
+              <p className="text-xs text-red-800 font-bold">Warning:</p>
+              <p className="text-[11px] text-red-700 font-semibold leading-relaxed">
+                This will delete the journal entry header and all associated journal lines.
+                The deleted data will be archived in the Revision Log and can only be restored within 24 hours.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest block">
+                Type <span className="text-red-600">im sure to delete</span> to confirm *
+              </label>
+              <input
+                type="text"
+                placeholder="Type here..."
+                value={deleteConfirmText}
+                onChange={e => setDeleteConfirmText(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
+              />
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setDeletingEntry(null)}
+                className="text-gray-500 hover:text-gray-700 font-bold text-xs transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteEntry}
+                disabled={deleteConfirmText !== 'im sure to delete' || deleting}
+                className={`flex items-center space-x-1.5 px-4 py-2 rounded-lg text-xs font-black transition-all ${
+                  deleteConfirmText === 'im sure to delete' && !deleting
+                    ? 'bg-red-600 hover:bg-red-700 text-white shadow-sm shadow-red-200'
+                    : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                }`}
+              >
+                {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                <span>{deleting ? 'Deleting...' : 'Delete Entry'}</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

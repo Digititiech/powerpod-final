@@ -25,6 +25,7 @@ const CompanySettings: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [logoUploading, setLogoUploading] = useState(false);
 
   useEffect(() => {
     fetchSettings();
@@ -88,6 +89,39 @@ const CompanySettings: React.FC = () => {
 
   const handleChange = (key: string, value: string) => {
     setSettings(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setLogoUploading(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const ext = file.name.split('.').pop();
+      const path = `logo_${Date.now()}.${ext}`;
+
+      const { error: uploadErr } = await supabase.storage
+        .from('company-logos')
+        .upload(path, file);
+
+      if (uploadErr) throw uploadErr;
+
+      const { data: urlData } = supabase.storage
+        .from('company-logos')
+        .getPublicUrl(path);
+
+      if (urlData?.publicUrl) {
+        handleChange('company_logo_url', urlData.publicUrl);
+        setSuccess('✅ Logo uploaded successfully. Make sure to click Save Settings to apply.');
+        setTimeout(() => setSuccess(null), 5000);
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to upload logo.');
+    } finally {
+      setLogoUploading(false);
+    }
   };
 
   return (
@@ -252,17 +286,62 @@ const CompanySettings: React.FC = () => {
             </button>
           </div>
 
-          {/* Quick Help Sidebar */}
-          <div className="col-span-1 bg-white border border-gray-200 rounded-2xl shadow-sm p-6 space-y-4">
-            <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest">Setup Info</h4>
-            <div className="space-y-4 text-xs text-gray-500 leading-relaxed font-semibold">
-              <div className="flex items-start space-x-2">
-                <ShieldCheck size={16} className="text-emerald-500 shrink-0 mt-0.5" />
-                <p>These settings are used to format printed vouchers (PDFs) and calculate standard VAT splits across the general ledger.</p>
+          {/* Logo & Info Sidebar */}
+          <div className="col-span-1 space-y-6">
+            {/* Logo Upload Section */}
+            <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-6 space-y-4">
+              <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest">Company Logo</h4>
+              <div className="flex flex-col items-center justify-center border-2 border-dashed border-gray-200 rounded-xl p-4 text-center hover:border-purple-300 transition-all relative">
+                {settings.company_logo_url ? (
+                  <div className="space-y-3 relative w-full">
+                    <img 
+                      src={settings.company_logo_url} 
+                      alt="Company Logo" 
+                      className="max-h-32 mx-auto object-contain rounded-lg"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleChange('company_logo_url', '')}
+                      className="text-red-500 hover:text-red-700 text-[10px] font-black uppercase tracking-wider block mx-auto mt-2"
+                    >
+                      Remove Logo
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <Building2 className="w-12 h-12 text-gray-300 mx-auto" />
+                    <p className="text-xs text-gray-500 font-bold">No logo uploaded yet</p>
+                    <label className="inline-block px-3 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10px] font-black uppercase tracking-wider rounded-lg cursor-pointer transition">
+                      Upload Logo
+                      <input 
+                        type="file" 
+                        accept="image/*"
+                        onChange={handleLogoUpload}
+                        className="hidden" 
+                      />
+                    </label>
+                  </div>
+                )}
+                {logoUploading && (
+                  <div className="absolute inset-0 bg-white/80 flex items-center justify-center rounded-xl">
+                    <Loader2 size={24} className="text-purple-600 animate-spin" />
+                  </div>
+                )}
               </div>
-              <div className="flex items-start space-x-2">
-                <HelpCircle size={16} className="text-purple-500 shrink-0 mt-0.5" />
-                <p>Tax Registration Numbers are displayed on invoices and vouchers as legally required by local tax authorities (FTA in the UAE).</p>
+            </div>
+
+            {/* Quick Help Sidebar */}
+            <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-6 space-y-4">
+              <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest">Setup Info</h4>
+              <div className="space-y-4 text-xs text-gray-500 leading-relaxed font-semibold">
+                <div className="flex items-start space-x-2">
+                  <ShieldCheck size={16} className="text-emerald-500 shrink-0 mt-0.5" />
+                  <p>These settings are used to format printed vouchers (PDFs) and calculate standard VAT splits across the general ledger.</p>
+                </div>
+                <div className="flex items-start space-x-2">
+                  <HelpCircle size={16} className="text-purple-500 shrink-0 mt-0.5" />
+                  <p>Tax Registration Numbers are displayed on invoices and vouchers as legally required by local tax authorities (FTA in the UAE).</p>
+                </div>
               </div>
             </div>
           </div>

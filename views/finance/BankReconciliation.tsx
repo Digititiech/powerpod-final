@@ -59,6 +59,10 @@ const BankReconciliation: React.FC = () => {
   });
   const [endDate, setEndDate] = useState(today());
   
+  // Wizard steps state
+  const [wizardStep, setWizardStep] = useState<number>(1);
+  const [uploadedFileName, setUploadedFileName] = useState<string>('');
+
   // Step 1: Upload & Map State
   const [csvData, setCsvData] = useState<string[][]>([]);
   const [headers, setHeaders] = useState<string[]>([]);
@@ -130,6 +134,10 @@ const BankReconciliation: React.FC = () => {
         setSession(null);
         setStatementLines([]);
         setLedgerItems([]);
+        setWizardStep(1);
+        setUploadedFileName('');
+        setCsvData([]);
+        setHeaders([]);
       }
     } catch (err: any) {
       console.error(err);
@@ -166,6 +174,8 @@ const BankReconciliation: React.FC = () => {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    setUploadedFileName(file.name);
 
     const reader = new FileReader();
     reader.onload = (evt) => {
@@ -373,6 +383,10 @@ const BankReconciliation: React.FC = () => {
       setSession(null);
       setStatementLines([]);
       setLedgerItems([]);
+      setWizardStep(1);
+      setUploadedFileName('');
+      setCsvData([]);
+      setHeaders([]);
       setSuccess('Session reset successfully.');
     } catch (err: any) {
       setError(err.message);
@@ -393,6 +407,10 @@ const BankReconciliation: React.FC = () => {
       setSession(null);
       setStatementLines([]);
       setLedgerItems([]);
+      setWizardStep(1);
+      setUploadedFileName('');
+      setCsvData([]);
+      setHeaders([]);
       setSuccess('✅ Bank reconciliation session marked as completed!');
     } catch (err: any) {
       setError(err.message);
@@ -400,6 +418,34 @@ const BankReconciliation: React.FC = () => {
       setLoading(false);
     }
   };
+
+  // Helper to show column map badges in preview table
+  const getMappedBadge = (headerName: string) => {
+    if (columnMap.dateCol === headerName) return <span className="inline-block px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[8px] font-black uppercase">Date Field</span>;
+    if (columnMap.descCol === headerName) return <span className="inline-block px-1.5 py-0.5 rounded bg-orange-100 text-orange-800 text-[8px] font-black uppercase">Desc Field</span>;
+    if (columnMap.amountType === 'single') {
+      if (columnMap.amountCol === headerName) return <span className="inline-block px-1.5 py-0.5 rounded bg-green-100 text-green-800 text-[8px] font-black uppercase">Amount Field</span>;
+    } else {
+      if (columnMap.debitCol === headerName) return <span className="inline-block px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[8px] font-black uppercase">Debit Field</span>;
+      if (columnMap.creditCol === headerName) return <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[8px] font-black uppercase">Credit Field</span>;
+    }
+    return null;
+  };
+
+  // Helper to highlight columns in preview table
+  const getColHighlightClass = (headerName: string) => {
+    if (columnMap.dateCol === headerName) return 'bg-blue-50/40 text-blue-900 border-l border-r border-blue-100';
+    if (columnMap.descCol === headerName) return 'bg-orange-50/40 text-orange-900 border-l border-r border-orange-100';
+    if (columnMap.amountType === 'single') {
+      if (columnMap.amountCol === headerName) return 'bg-green-50/40 text-green-900 border-l border-r border-green-100';
+    } else {
+      if (columnMap.debitCol === headerName) return 'bg-red-50/40 text-red-900 border-l border-r border-red-100';
+      if (columnMap.creditCol === headerName) return 'bg-emerald-50/40 text-emerald-900 border-l border-r border-emerald-100';
+    }
+    return '';
+  };
+
+  const isStep1Valid = !!(startDate && endDate && startDate <= endDate);
 
   // Reconciled amounts calculation
   const totalReconciledLines = statementLines.filter(l => l.match_status === 'matched').length;
@@ -429,156 +475,317 @@ const BankReconciliation: React.FC = () => {
       ) : !session ? (
         /* Setup / Import Statement screen */
         <div className="grid grid-cols-5 gap-6">
-          {/* File Upload Zone */}
+          {/* File Upload Zone / Wizard */}
           <div className="col-span-3 bg-white border border-gray-200 rounded-2xl shadow-sm p-6 space-y-5">
-            <h3 className="text-xs font-black text-gray-900 uppercase tracking-wider">Start Reconciliation</h3>
-
-            <div className="grid grid-cols-3 gap-4">
-              <div>
-                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Bank Account</label>
-                <select
-                  value={selectedBankCode}
-                  onChange={e => setSelectedBankCode(e.target.value)}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-slate-500 bg-white"
-                >
-                  {bankAccounts.map(b => (
-                    <option key={b.code} value={b.code}>{b.code} — {b.name}</option>
-                  ))}
-                </select>
+            {/* Step Progress Indicator */}
+            <div className="flex items-center justify-between pb-5 border-b border-gray-100">
+              <div className="flex items-center space-x-2">
+                <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black border ${
+                  wizardStep === 1
+                    ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
+                    : wizardStep > 1
+                    ? 'bg-emerald-500 border-emerald-500 text-white'
+                    : 'bg-white border-gray-200 text-gray-400'
+                }`}>
+                  {wizardStep > 1 ? <Check size={12} /> : '1'}
+                </span>
+                <span className={`text-xs font-black ${wizardStep === 1 ? 'text-gray-900' : 'text-gray-400'}`}>Parameters</span>
               </div>
-              <div>
-                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Start Date</label>
-                <input
-                  type="date"
-                  value={startDate}
-                  onChange={e => setStartDate(e.target.value)}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-slate-500"
-                />
+              <div className="flex-1 h-[2px] bg-gray-100 mx-4" />
+              <div className="flex items-center space-x-2">
+                <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black border ${
+                  wizardStep === 2
+                    ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
+                    : wizardStep > 2
+                    ? 'bg-emerald-500 border-emerald-500 text-white'
+                    : 'bg-white border-gray-200 text-gray-400'
+                }`}>
+                  {wizardStep > 2 ? <Check size={12} /> : '2'}
+                </span>
+                <span className={`text-xs font-black ${wizardStep === 2 ? 'text-gray-900' : 'text-gray-400'}`}>Upload CSV</span>
               </div>
-              <div>
-                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">End Date</label>
-                <input
-                  type="date"
-                  value={endDate}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-slate-500"
-                  onChange={e => setEndDate(e.target.value)}
-                />
+              <div className="flex-1 h-[2px] bg-gray-100 mx-4" />
+              <div className="flex items-center space-x-2">
+                <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black border ${
+                  wizardStep === 3
+                    ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
+                    : 'bg-white border-gray-200 text-gray-400'
+                }`}>
+                  3
+                </span>
+                <span className={`text-xs font-black ${wizardStep === 3 ? 'text-gray-900' : 'text-gray-400'}`}>Mapping</span>
               </div>
             </div>
 
-            {/* CSV Dropzone */}
-            <div 
-              onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-gray-200 hover:border-slate-300 hover:bg-slate-50/20 rounded-xl p-8 text-center cursor-pointer transition"
-            >
-              <input
-                type="file"
-                ref={fileInputRef}
-                accept=".csv"
-                className="hidden"
-                onChange={handleFileUpload}
-              />
-              <Upload className="mx-auto text-gray-400 mb-2" size={24} />
-              <p className="text-xs font-black text-gray-800">Upload Bank Statement (CSV)</p>
-              <p className="text-[10px] text-gray-400 font-semibold mt-0.5">Must contain date, description, and transactions</p>
-            </div>
-
-            {/* Dynamic Column Mapping */}
-            {headers.length > 0 && (
-              <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">CSV Column Mapping</span>
-                  <div className="flex items-center space-x-3">
-                    <button
-                      type="button"
-                      onClick={() => setColumnMap(m => ({ ...m, amountType: 'single' }))}
-                      className={`text-[9px] font-black px-2 py-1 rounded border transition ${
-                        columnMap.amountType === 'single' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-gray-500 hover:bg-gray-50'
-                      }`}
-                    >
-                      Single Amount Col
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setColumnMap(m => ({ ...m, amountType: 'split' }))}
-                      className={`text-[9px] font-black px-2 py-1 rounded border transition ${
-                        columnMap.amountType === 'split' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-gray-500 hover:bg-gray-50'
-                      }`}
-                    >
-                      Separate Dr/Cr Col
-                    </button>
-                  </div>
+            {/* Step 1 View */}
+            {wizardStep === 1 && (
+              <div className="space-y-5">
+                <div>
+                  <h3 className="text-xs font-black text-gray-900 uppercase tracking-wider">Step 1: Reconciliation Parameters</h3>
+                  <p className="text-xs text-gray-500 font-semibold mt-0.5">Select your cash account and reconciliation cycle range</p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 text-xs font-semibold">
+                <div className="space-y-4">
                   <div>
-                    <label className="block text-[9px] text-gray-400 mb-1">Date Column</label>
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Bank Account</label>
                     <select
-                      value={columnMap.dateCol}
-                      onChange={e => setColumnMap(m => ({ ...m, dateCol: e.target.value }))}
-                      className="w-full border border-gray-200 rounded-lg p-2 bg-white"
+                      value={selectedBankCode}
+                      onChange={e => setSelectedBankCode(e.target.value)}
+                      className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white"
                     >
-                      {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                      {bankAccounts.map(b => (
+                        <option key={b.code} value={b.code}>{b.code} — {b.name}</option>
+                      ))}
                     </select>
                   </div>
-                  <div>
-                    <label className="block text-[9px] text-gray-400 mb-1">Description Column</label>
-                    <select
-                      value={columnMap.descCol}
-                      onChange={e => setColumnMap(m => ({ ...m, descCol: e.target.value }))}
-                      className="w-full border border-gray-200 rounded-lg p-2 bg-white"
-                    >
-                      {headers.map(h => <option key={h} value={h}>{h}</option>)}
-                    </select>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Start Date</label>
+                      <input
+                        type="date"
+                        value={startDate}
+                        onChange={e => setStartDate(e.target.value)}
+                        className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-blue-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">End Date</label>
+                      <input
+                        type="date"
+                        value={endDate}
+                        className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        onChange={e => setEndDate(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  {startDate && endDate && startDate > endDate && (
+                    <p className="text-xs text-red-500 font-bold">Start Date must be before or equal to End Date.</p>
+                  )}
+                </div>
+
+                <div className="flex justify-end pt-4 border-t border-gray-100">
+                  <button
+                    type="button"
+                    disabled={!isStep1Valid}
+                    onClick={() => setWizardStep(2)}
+                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-black rounded-xl transition flex items-center space-x-1.5 shadow-md shadow-blue-500/10"
+                  >
+                    <span>Next: Upload CSV</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Step 2 View */}
+            {wizardStep === 2 && (
+              <div className="space-y-5">
+                <div>
+                  <h3 className="text-xs font-black text-gray-900 uppercase tracking-wider">Step 2: Upload Bank Statement</h3>
+                  <p className="text-xs text-gray-500 font-semibold mt-0.5">Upload a bank transaction log in CSV format</p>
+                </div>
+
+                {/* CSV Dropzone */}
+                <div 
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition ${
+                    uploadedFileName
+                      ? 'border-emerald-400 bg-emerald-50/5'
+                      : 'border-gray-200 hover:border-blue-400 hover:bg-slate-50/20'
+                  }`}
+                >
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    accept=".csv"
+                    className="hidden"
+                    onChange={handleFileUpload}
+                  />
+                  <Upload className={`mx-auto mb-2 ${uploadedFileName ? 'text-emerald-500' : 'text-gray-400'}`} size={24} />
+                  <p className="text-xs font-black text-gray-800">
+                    {uploadedFileName ? 'Statement Uploaded Successfully' : 'Select Bank Statement (CSV)'}
+                  </p>
+                  <p className="text-[10px] text-gray-400 font-semibold mt-0.5">Click to browse or upload statement</p>
+                </div>
+
+                {uploadedFileName && csvData.length > 0 && (
+                  <div className="p-4 bg-emerald-50 border border-emerald-100 rounded-xl flex items-center space-x-3 text-emerald-800">
+                    <CheckCircle2 size={20} className="shrink-0 text-emerald-600" />
+                    <div>
+                      <p className="text-xs font-bold leading-tight">File Parsed Successfully</p>
+                      <p className="text-[10px] font-semibold text-emerald-600 mt-0.5">
+                        Filename: {uploadedFileName} ({csvData.length} lines parsed)
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-between pt-4 border-t border-gray-100">
+                  <button
+                    type="button"
+                    onClick={() => setWizardStep(1)}
+                    className="px-5 py-2.5 border border-gray-200 text-gray-600 hover:bg-gray-50 text-xs font-black rounded-xl transition"
+                  >
+                    Back to Parameters
+                  </button>
+                  <button
+                    type="button"
+                    disabled={csvData.length === 0}
+                    onClick={() => setWizardStep(3)}
+                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-black rounded-xl transition shadow-md shadow-blue-500/10"
+                  >
+                    Next: Map Columns
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Step 3 View */}
+            {wizardStep === 3 && (
+              <div className="space-y-5">
+                <div>
+                  <h3 className="text-xs font-black text-gray-900 uppercase tracking-wider">Step 3: Column Mapping & Live Preview</h3>
+                  <p className="text-xs text-gray-500 font-semibold mt-0.5">Match column headers to system accounting fields</p>
+                </div>
+
+                <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">CSV Column Mapping</span>
+                    <div className="flex items-center space-x-3">
+                      <button
+                        type="button"
+                        onClick={() => setColumnMap(m => ({ ...m, amountType: 'single' }))}
+                        className={`text-[9px] font-black px-2 py-1 rounded border transition ${
+                          columnMap.amountType === 'single' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-gray-500 hover:bg-gray-50'
+                        }`}
+                      >
+                        Single Amount Col
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setColumnMap(m => ({ ...m, amountType: 'split' }))}
+                        className={`text-[9px] font-black px-2 py-1 rounded border transition ${
+                          columnMap.amountType === 'split' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-gray-500 hover:bg-gray-50'
+                        }`}
+                      >
+                        Separate Dr/Cr Col
+                      </button>
+                    </div>
                   </div>
 
-                  {columnMap.amountType === 'single' ? (
-                    <div className="col-span-2">
-                      <label className="block text-[9px] text-gray-400 mb-1">Amount Column</label>
+                  <div className="grid grid-cols-2 gap-4 text-xs font-semibold">
+                    <div>
+                      <label className="block text-[9px] text-gray-400 mb-1">Date Column *</label>
                       <select
-                        value={columnMap.amountCol}
-                        onChange={e => setColumnMap(m => ({ ...m, amountCol: e.target.value }))}
+                        value={columnMap.dateCol}
+                        onChange={e => setColumnMap(m => ({ ...m, dateCol: e.target.value }))}
                         className="w-full border border-gray-200 rounded-lg p-2 bg-white"
                       >
                         {headers.map(h => <option key={h} value={h}>{h}</option>)}
                       </select>
                     </div>
-                  ) : (
-                    <>
-                      <div>
-                        <label className="block text-[9px] text-gray-400 mb-1">Debit Column</label>
+                    <div>
+                      <label className="block text-[9px] text-gray-400 mb-1">Description Column *</label>
+                      <select
+                        value={columnMap.descCol}
+                        onChange={e => setColumnMap(m => ({ ...m, descCol: e.target.value }))}
+                        className="w-full border border-gray-200 rounded-lg p-2 bg-white"
+                      >
+                        {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                      </select>
+                    </div>
+
+                    {columnMap.amountType === 'single' ? (
+                      <div className="col-span-2">
+                        <label className="block text-[9px] text-gray-400 mb-1">Amount Column *</label>
                         <select
-                          value={columnMap.debitCol}
-                          onChange={e => setColumnMap(m => ({ ...m, debitCol: e.target.value }))}
+                          value={columnMap.amountCol}
+                          onChange={e => setColumnMap(m => ({ ...m, amountCol: e.target.value }))}
                           className="w-full border border-gray-200 rounded-lg p-2 bg-white"
                         >
-                          <option value="">-- None --</option>
                           {headers.map(h => <option key={h} value={h}>{h}</option>)}
                         </select>
                       </div>
-                      <div>
-                        <label className="block text-[9px] text-gray-400 mb-1">Credit Column</label>
-                        <select
-                          value={columnMap.creditCol}
-                          onChange={e => setColumnMap(m => ({ ...m, creditCol: e.target.value }))}
-                          className="w-full border border-gray-200 rounded-lg p-2 bg-white"
-                        >
-                          <option value="">-- None --</option>
-                          {headers.map(h => <option key={h} value={h}>{h}</option>)}
-                        </select>
-                      </div>
-                    </>
-                  )}
+                    ) : (
+                      <>
+                        <div>
+                          <label className="block text-[9px] text-gray-400 mb-1">Debit Column</label>
+                          <select
+                            value={columnMap.debitCol}
+                            onChange={e => setColumnMap(m => ({ ...m, debitCol: e.target.value }))}
+                            className="w-full border border-gray-200 rounded-lg p-2 bg-white"
+                          >
+                            <option value="">-- None --</option>
+                            {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[9px] text-gray-400 mb-1">Credit Column</label>
+                          <select
+                            value={columnMap.creditCol}
+                            onChange={e => setColumnMap(m => ({ ...m, creditCol: e.target.value }))}
+                            className="w-full border border-gray-200 rounded-lg p-2 bg-white"
+                          >
+                            <option value="">-- None --</option>
+                            {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                          </select>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
 
-                <button
-                  onClick={handleCreateSession}
-                  disabled={loading}
-                  className="w-full py-2.5 bg-slate-900 hover:bg-black text-white text-xs font-black rounded-xl transition flex items-center justify-center space-x-1.5"
-                >
-                  {loading ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                  <span>Start Reconciliation Session</span>
-                </button>
+                {/* Live Preview Table */}
+                <div className="space-y-2">
+                  <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block">Live CSV Data Preview (First 3 rows)</span>
+                  <div className="border border-gray-200 rounded-xl overflow-x-auto">
+                    <table className="min-w-full text-xs font-semibold text-gray-700 bg-white">
+                      <thead className="bg-gray-50 text-[10px] font-black text-gray-400 uppercase tracking-widest border-b border-gray-200">
+                        <tr>
+                          {headers.map(h => (
+                            <th key={h} className={`px-3 py-2 text-left transition-colors duration-150 ${getColHighlightClass(h)}`}>
+                              <div className="space-y-1">
+                                <div>{h}</div>
+                                {getMappedBadge(h)}
+                              </div>
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 bg-white text-gray-700">
+                        {csvData.slice(0, 3).map((row, rIdx) => (
+                          <tr key={rIdx}>
+                            {row.map((cell, cIdx) => {
+                              const header = headers[cIdx];
+                              return (
+                                <td key={cIdx} className={`px-3 py-2 transition-colors duration-150 max-w-[150px] truncate ${getColHighlightClass(header)}`}>
+                                  {cell}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="flex justify-between pt-4 border-t border-gray-100">
+                  <button
+                    type="button"
+                    onClick={() => setWizardStep(2)}
+                    className="px-5 py-2.5 border border-gray-200 text-gray-600 hover:bg-gray-50 text-xs font-black rounded-xl transition"
+                  >
+                    Back to Upload
+                  </button>
+                  <button
+                    onClick={handleCreateSession}
+                    disabled={loading}
+                    className="px-6 py-2.5 bg-slate-900 hover:bg-black text-white text-xs font-black rounded-xl transition flex items-center justify-center space-x-1.5 shadow-md"
+                  >
+                    {loading ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                    <span>Start Reconciliation</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>

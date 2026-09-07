@@ -14,7 +14,9 @@ import {
   TrendingUp,
   X,
   CreditCard,
-  User
+  User,
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Employee, PayrollRun, Payslip, Account } from '../types';
@@ -92,6 +94,32 @@ const Payroll: React.FC = () => {
   const [loadingPayslips, setLoadingPayslips] = useState(false);
   const [printingPayslip, setPrintingPayslip] = useState<any | null>(null);
 
+  const [deletingPayroll, setDeletingPayroll] = useState<any | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDeletePayroll = async () => {
+    if (!deletingPayroll) return;
+    setDeleting(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const { error: err } = await supabase.rpc('delete_payroll_run_with_log', {
+        p_payroll_run_id: deletingPayroll.id
+      });
+      if (err) throw err;
+      setDeletingPayroll(null);
+      setSelectedRun(null);
+      await fetchData();
+      setSuccess('Payroll run successfully deleted.');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete payroll run.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const monthOptions = [
     'January', 'February', 'March', 'April', 'May', 'June', 
     'July', 'August', 'September', 'October', 'November', 'December'
@@ -134,6 +162,97 @@ const Payroll: React.FC = () => {
     }
   };
 
+  const [calculatingCommissions, setCalculatingCommissions] = useState(false);
+
+  const recalculateCommissions = async (monthName: string, yearStr: string) => {
+    setCalculatingCommissions(true);
+    try {
+      const shortMonth = monthName.substring(0, 3);
+      const monthStr = `${shortMonth} ${yearStr}`;
+
+      // 1. Fetch the monthly report for this month
+      const { data: report } = await supabase
+        .from('monthly_reports')
+        .select('id')
+        .eq('report_month', monthStr)
+        .maybeSingle();
+
+      if (!report) {
+        // No report exists for this month, default commission to 0 for all drafts
+        setRunDrafts(prev => {
+          const next = { ...prev };
+          for (const empId of Object.keys(next)) {
+            next[empId] = { ...next[empId], commission: 0 };
+          }
+          return next;
+        });
+        return;
+      }
+
+      // 2. Fetch all merchant summaries for this report
+      const { data: summaries } = await supabase
+        .from('merchant_period_summaries')
+        .select('total_sales, tax_amount, stripe_fees, merchant_payable, merchant_id')
+        .eq('report_id', report.id);
+
+      // 3. Fetch merchants to check assigned sales staff
+      const { data: merchantsList } = await supabase
+        .from('merchants')
+        .select('id, sales_staff_id');
+
+      if (!summaries || !merchantsList) return;
+
+      // Group summaries by merchant_id
+      const merchantSummariesMap = new Map<string, any>();
+      summaries.forEach(s => {
+        merchantSummariesMap.set(s.merchant_id, s);
+      });
+
+      // Calculate commissions per employee
+      setRunDrafts(prev => {
+        const next = { ...prev };
+        employees.forEach(emp => {
+          const staffId = emp.id;
+          const salesPct = emp.sales_percentage || 0;
+          if (salesPct <= 0) {
+            next[staffId] = { ...next[staffId], commission: 0 };
+            return;
+          }
+
+          // Find all merchants assigned to this staff member
+          const assignedMerchants = merchantsList.filter(m => m.sales_staff_id === staffId);
+          let totalComm = 0;
+
+          assignedMerchants.forEach(m => {
+            const summary = merchantSummariesMap.get(m.id);
+            if (summary) {
+              const totalSales = Number(summary.total_sales) || 0;
+              const tax = Number(summary.tax_amount) || 0;
+              const stripe = Number(summary.stripe_fees) || 0;
+              const payable = Number(summary.merchant_payable) || 0;
+              // Net profit of powerpod = after deducting tax, stripe fees, and merchant payable share
+              const netProfit = totalSales - tax - stripe - payable;
+              if (netProfit > 0) {
+                totalComm += netProfit * (salesPct / 100);
+              }
+            }
+          });
+
+          // Round to 2 decimal places
+          if (next[staffId]) {
+            next[staffId] = { ...next[staffId], commission: Math.round(totalComm * 100) / 100 };
+          }
+        });
+        return next;
+      });
+
+    } catch (err) {
+      console.error('Failed to recalculate commissions:', err);
+    } finally {
+      setCalculatingCommissions(false);
+    }
+  };
+
   const handleOpenCreate = () => {
     const defaultDrafts: Record<string, { base: number, allowances: number, commission: number, deductions: number, advances: number }> = {};
     employees.forEach(emp => {
@@ -149,11 +268,15 @@ const Payroll: React.FC = () => {
 
     const now = new Date();
     const currentMonthName = monthOptions[now.getMonth()];
+    const initialYear = '2026';
 
     setRunDrafts(defaultDrafts);
     setSelectedMonth(currentMonthName);
-    setSelectedYear('2026');
+    setSelectedYear(initialYear);
     setShowModal(true);
+
+    // Fetch initial commissions
+    recalculateCommissions(currentMonthName, initialYear);
   };
 
   const handleCommissionChange = (empId: string, val: string) => {
@@ -605,6 +728,19 @@ const Payroll: React.FC = () => {
                   </button>
                 )}
 
+                {hasFeature('ledger.journal.delete') && (
+                  <button
+                    onClick={() => {
+                      setDeletingPayroll(selectedRun);
+                      setDeleteConfirmText('');
+                    }}
+                    className="w-full bg-red-50 hover:bg-red-100 text-red-600 font-bold py-2 px-4 rounded-xl transition duration-150 text-xs flex items-center justify-center space-x-2 border border-red-200"
+                  >
+                    <Trash2 size={14} />
+                    <span>Delete Payroll Run</span>
+                  </button>
+                )}
+
                 {/* Payslips breakdown */}
                 <div>
                   <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3">Individual Payslips</h4>
@@ -671,7 +807,10 @@ const Payroll: React.FC = () => {
                   <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Disbursement Month</label>
                   <select
                     value={selectedMonth}
-                    onChange={(e) => setSelectedMonth(e.target.value)}
+                    onChange={(e) => {
+                      setSelectedMonth(e.target.value);
+                      recalculateCommissions(e.target.value, selectedYear);
+                    }}
                     className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-semibold"
                   >
                     {monthOptions.map(m => (
@@ -683,7 +822,10 @@ const Payroll: React.FC = () => {
                   <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Disbursement Year</label>
                   <select
                     value={selectedYear}
-                    onChange={(e) => setSelectedYear(e.target.value)}
+                    onChange={(e) => {
+                      setSelectedYear(e.target.value);
+                      recalculateCommissions(selectedMonth, e.target.value);
+                    }}
                     className="w-full border border-gray-200 rounded-lg p-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-semibold"
                   >
                     <option value="2026">2026</option>
@@ -694,7 +836,15 @@ const Payroll: React.FC = () => {
 
               {/* Personnel List */}
               <div className="space-y-3">
-                <h4 className="text-xs font-black uppercase text-gray-400 tracking-wider">Active Employees Compensation List</h4>
+                <div className="flex justify-between items-center">
+                  <h4 className="text-xs font-black uppercase text-gray-400 tracking-wider">Active Employees Compensation List</h4>
+                  {calculatingCommissions && (
+                    <span className="text-[10px] font-bold text-blue-600 flex items-center space-x-1.5 animate-pulse">
+                      <Loader2 size={10} className="animate-spin" />
+                      <span>Recalculating sales commissions...</span>
+                    </span>
+                  )}
+                </div>
                 
                 <div className="border border-gray-200 rounded-xl overflow-hidden">
                   <table className="min-w-full divide-y divide-gray-200 text-sm">
@@ -739,7 +889,7 @@ const Payroll: React.FC = () => {
                                 min="0"
                                 step="0.01"
                                 placeholder="0.00"
-                                value={item.commission || ''}
+                                value={item.commission !== undefined && item.commission !== null ? item.commission : ''}
                                 onChange={(e) => handleCommissionChange(emp.id, e.target.value)}
                                 className="w-24 border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 font-bold"
                               />
@@ -750,7 +900,7 @@ const Payroll: React.FC = () => {
                                 min="0"
                                 step="0.01"
                                 placeholder="0.00"
-                                value={item.deductions || ''}
+                                value={item.deductions !== undefined && item.deductions !== null ? item.deductions : ''}
                                 onChange={(e) => handleDeductionChange(emp.id, e.target.value)}
                                 className="w-24 border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 font-bold"
                               />
@@ -761,7 +911,7 @@ const Payroll: React.FC = () => {
                                 min="0"
                                 step="0.01"
                                 placeholder="0.00"
-                                value={item.advances || ''}
+                                value={item.advances !== undefined && item.advances !== null ? item.advances : ''}
                                 onChange={(e) => handleAdvanceChange(emp.id, e.target.value)}
                                 className="w-24 border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 font-bold"
                               />
@@ -901,6 +1051,67 @@ const Payroll: React.FC = () => {
                 <div className="border-b border-gray-200 w-full" />
                 <p className="font-black text-gray-500 uppercase">Employee Signature</p>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deletingPayroll && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 p-6 space-y-4">
+            <div className="flex items-center space-x-3 text-red-600">
+              <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center">
+                <AlertTriangle size={20} />
+              </div>
+              <div>
+                <h3 className="text-gray-900 font-black text-sm">Confirm Payroll Deletion</h3>
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
+                  Period: {deletingPayroll.payroll_month}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-red-50/50 border border-red-100 rounded-xl space-y-1">
+              <p className="text-xs text-red-800 font-bold">Warning:</p>
+              <p className="text-[11px] text-red-700 font-semibold leading-relaxed">
+                This will delete the payroll run record for <strong>{deletingPayroll.payroll_month}</strong>, all of its generated individual payslips, and its associated ledger double-entry lines (if approved).
+                All deleted records will be archived in the Revision Log and can only be restored within 24 hours.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest block">
+                Type <span className="text-red-600">im sure to delete</span> to confirm *
+              </label>
+              <input
+                type="text"
+                placeholder="Type here..."
+                value={deleteConfirmText}
+                onChange={e => setDeleteConfirmText(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
+              />
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setDeletingPayroll(null)}
+                className="text-gray-500 hover:text-gray-700 font-bold text-xs transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeletePayroll}
+                disabled={deleteConfirmText !== 'im sure to delete' || deleting}
+                className={`flex items-center space-x-1.5 px-4 py-2 rounded-lg text-xs font-black transition-all ${
+                  deleteConfirmText === 'im sure to delete' && !deleting
+                    ? 'bg-red-600 hover:bg-red-700 text-white shadow-sm shadow-red-200'
+                    : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                }`}
+              >
+                {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                <span>{deleting ? 'Deleting...' : 'Delete Payroll'}</span>
+              </button>
             </div>
           </div>
         </div>

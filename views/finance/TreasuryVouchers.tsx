@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Plus, Receipt, ArrowUpRight, ArrowDownLeft, Wallet, 
-  Printer, Loader2, AlertCircle, CheckCircle2, FileText, Upload, X 
+  Printer, Loader2, AlertCircle, CheckCircle2, FileText, Upload, X, Trash2, AlertTriangle, Mail
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { postReceiptVoucher, postPaymentVoucher } from '../../lib/accountingEngine';
 import { TreasuryVoucher, Account } from '../../types';
+import { useAccessControl } from '../../lib/AccessControlContext';
 
 const fmt = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const today = () => new Date().toISOString().split('T')[0];
@@ -68,6 +69,7 @@ interface VoucherFormState {
   purpose: string;
   reference: string;
   notes: string;
+  invoice_id?: string;
 }
 
 const DEFAULT_FORM = (type: 'receipt' | 'payment'): VoucherFormState => ({
@@ -78,14 +80,103 @@ const DEFAULT_FORM = (type: 'receipt' | 'payment'): VoucherFormState => ({
   purpose: type === 'receipt' ? 'clear_ar' : 'clear_ap',
   reference: '',
   notes: '',
+  invoice_id: '',
 });
 
 const TreasuryVouchers: React.FC = () => {
+  const { hasFeature } = useAccessControl();
   const [activeSubTab, setActiveSubTab] = useState<'receipt' | 'payment' | 'history'>('receipt');
   const [form, setForm] = useState<VoucherFormState>(DEFAULT_FORM('receipt'));
   const [vouchers, setVouchers] = useState<TreasuryVoucher[]>([]);
   const [bankAccounts, setBankAccounts] = useState<Account[]>([]);
+  const [invoices, setInvoices] = useState<any[]>([]);
   const [companyDetails, setCompanyDetails] = useState<Record<string, string>>({});
+  const [deletingVoucher, setDeletingVoucher] = useState<any | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  // Email States
+  const [showEmailModal, setShowEmailModal] = useState(false);
+  const [sendEmailItem, setSendEmailItem] = useState<any>(null);
+  const [sendEmailTo, setSendEmailTo] = useState('');
+  const [sendEmailCc, setSendEmailCc] = useState('');
+  const [sendEmailBcc, setSendEmailBcc] = useState('');
+  const [sendEmailSubject, setSendEmailSubject] = useState('');
+  const [sendEmailMessage, setSendEmailMessage] = useState('');
+  const [emailSending, setEmailSending] = useState(false);
+
+  const handleSendEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sendEmailTo.trim()) {
+      setError('Recipient email is required.');
+      return;
+    }
+    setEmailSending(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const emailHtml = generateVoucherEmailHtml(sendEmailItem, sendEmailMessage, companyDetails);
+      
+      const { data, error: sendErr } = await supabase.functions.invoke('send-email', {
+        body: {
+          to: sendEmailTo,
+          cc: sendEmailCc || undefined,
+          bcc: sendEmailBcc || undefined,
+          subject: sendEmailSubject,
+          html: emailHtml,
+          from: "finance@powerpod.ae"
+        }
+      });
+
+      if (sendErr) throw sendErr;
+      if (data?.error) throw new Error(data.error);
+
+      setSuccess(`✉️ Email successfully dispatched to ${sendEmailTo}`);
+      setShowEmailModal(false);
+      // Reset
+      setSendEmailTo('');
+      setSendEmailCc('');
+      setSendEmailBcc('');
+      setSendEmailSubject('');
+      setSendEmailMessage('');
+      setTimeout(() => setSuccess(null), 5000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to dispatch email.');
+    } finally {
+      setEmailSending(false);
+    }
+  };
+
+  const handleInvoiceChange = (invoiceId: string) => {
+    const selected = invoices.find(inv => inv.id === invoiceId);
+    if (selected) {
+      setForm(f => ({
+        ...f,
+        invoice_id: invoiceId,
+        party_name: selected.customer_name,
+        amount: selected.total_amount.toString()
+      }));
+    } else {
+      setForm(f => ({ ...f, invoice_id: invoiceId }));
+    }
+  };
+
+  const handleDeleteVoucher = async () => {
+    if (!deletingVoucher) return;
+    setDeleting(true);
+    try {
+      const { error: err } = await supabase.rpc('delete_treasury_voucher_with_log', {
+        p_voucher_id: deletingVoucher.id
+      });
+      if (err) throw err;
+      setDeletingVoucher(null);
+      fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete voucher.');
+    } finally {
+      setDeleting(false);
+    }
+  };
   
   const [loading, setLoading] = useState(false);
   const [loadingData, setLoadingData] = useState(true);
@@ -133,8 +224,16 @@ const TreasuryVouchers: React.FC = () => {
         if (s.value) details[s.key] = s.value;
       });
 
+      // Fetch outstanding invoices
+      const { data: invList } = await supabase
+        .from('invoices')
+        .select('*')
+        .neq('status', 'paid')
+        .order('invoice_number', { ascending: true });
+
       setVouchers((vList || []) as TreasuryVoucher[]);
       setBankAccounts((banks || []) as Account[]);
+      setInvoices((invList || []) as any[]);
       setCompanyDetails(details);
     } catch (err: any) {
       console.error(err);
@@ -209,6 +308,7 @@ const TreasuryVouchers: React.FC = () => {
           attachment_url: attachmentUrl,
           status: 'posted',
           journal_entry_id: jeId,
+          invoice_id: activeSubTab === 'receipt' && form.invoice_id ? form.invoice_id : null
         })
         .select()
         .single();
@@ -265,12 +365,21 @@ const TreasuryVouchers: React.FC = () => {
           <div id="print-section" className="space-y-8 border-2 border-gray-300 p-8 rounded-xl bg-white">
             {/* Header */}
             <div className="flex justify-between items-start border-b-2 border-gray-200 pb-6">
-              <div>
-                <h1 className="text-2xl font-black tracking-tight">{companyDetails.company_name || 'PowerPod Technologies LLC'}</h1>
-                {companyDetails.company_trn && (
-                  <p className="text-xs font-bold text-gray-500 mt-1">TRN: {companyDetails.company_trn}</p>
+              <div className="flex items-start space-x-4">
+                {companyDetails.company_logo_url && (
+                  <img 
+                    src={companyDetails.company_logo_url} 
+                    alt="Logo" 
+                    className="w-16 h-16 object-contain rounded-lg shrink-0"
+                  />
                 )}
-                <p className="text-xs text-gray-500 font-semibold mt-0.5">{companyDetails.company_address || 'Dubai, United Arab Emirates'}</p>
+                <div>
+                  <h1 className="text-2xl font-black tracking-tight">{companyDetails.company_name || 'PowerPod Technologies LLC'}</h1>
+                  {companyDetails.company_trn && (
+                    <p className="text-xs font-bold text-gray-500 mt-1">TRN: {companyDetails.company_trn}</p>
+                  )}
+                  <p className="text-xs text-gray-500 font-semibold mt-0.5">{companyDetails.company_address || 'Dubai, United Arab Emirates'}</p>
+                </div>
               </div>
               <div className="text-right">
                 <h2 className="text-lg font-black uppercase text-gray-800 tracking-wider">
@@ -397,7 +506,7 @@ const TreasuryVouchers: React.FC = () => {
                       <th className="px-4 py-3">Client / Vendor</th>
                       <th className="px-4 py-3 text-right">Amount</th>
                       <th className="px-4 py-3">Purpose</th>
-                      <th className="px-4 py-3 text-center">Print</th>
+                      <th className="px-4 py-3 text-center">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 bg-white">
@@ -414,13 +523,39 @@ const TreasuryVouchers: React.FC = () => {
                         <td className="px-4 py-3.5 font-bold text-gray-900">{v.party_name}</td>
                         <td className="px-4 py-3.5 text-right font-black text-gray-900">AED {fmt(v.amount)}</td>
                         <td className="px-4 py-3.5 capitalize text-gray-500 font-semibold">{v.purpose.replace('_', ' ')}</td>
-                        <td className="px-4 py-3.5 text-center">
+                        <td className="px-4 py-3.5 text-center flex items-center justify-center space-x-2">
                           <button
                             onClick={() => handlePrint(v)}
                             className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+                            title="Print Voucher"
                           >
                             <Printer size={15} />
                           </button>
+                          <button
+                            onClick={() => {
+                              setSendEmailItem(v);
+                              setSendEmailTo('');
+                              setSendEmailSubject(`${v.voucher_type.toUpperCase()} Voucher ${v.voucher_number || ''} from PowerPod Technologies LLC`);
+                              setSendEmailMessage(`Dear Value Customer,\n\nPlease find details of the recorded voucher transaction reference: ${v.reference || 'N/A'}.\n\nThank you,\nPowerPod Finance`);
+                              setShowEmailModal(true);
+                            }}
+                            className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+                            title="Email Voucher"
+                          >
+                            <Mail size={15} />
+                          </button>
+                          {hasFeature('ledger.journal.delete') && v.status !== 'voided' && (
+                            <button
+                              onClick={() => {
+                                setDeletingVoucher(v);
+                                setDeleteConfirmText('');
+                              }}
+                              className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+                              title="Delete Voucher"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -496,6 +631,25 @@ const TreasuryVouchers: React.FC = () => {
                   )}
                 </select>
               </div>
+
+              {/* Linked Invoice (Optional) */}
+              {activeSubTab === 'receipt' && form.purpose === 'clear_ar' && (
+                <div className="col-span-2">
+                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5">Link to Invoice (Optional)</label>
+                  <select
+                    value={form.invoice_id || ''}
+                    onChange={e => handleInvoiceChange(e.target.value)}
+                    className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white"
+                  >
+                    <option value="">-- Do Not Link --</option>
+                    {invoices.map(inv => (
+                      <option key={inv.id} value={inv.id}>
+                        {inv.invoice_number} — {inv.customer_name} (Total: AED {fmt(inv.total_amount)} · Status: {inv.status.toUpperCase()})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Amount */}
               <div>
@@ -581,8 +735,257 @@ const TreasuryVouchers: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {deletingVoucher && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 p-6 space-y-4">
+            <div className="flex items-center space-x-3 text-red-600">
+              <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center">
+                <AlertTriangle size={20} />
+              </div>
+              <div>
+                <h3 className="text-gray-900 font-black text-sm">Confirm Voucher Deletion</h3>
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
+                  Party: {deletingVoucher.party_name}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-red-50/50 border border-red-100 rounded-xl space-y-1">
+              <p className="text-xs text-red-800 font-bold">Warning:</p>
+              <p className="text-[11px] text-red-700 font-semibold leading-relaxed">
+                This will delete the treasury voucher record of <strong>AED {fmt(deletingVoucher.amount)}</strong> and its associated ledger double-entry lines.
+                This data will be archived in the Revision Log and can only be restored within 24 hours.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest block">
+                Type <span className="text-red-600">im sure to delete</span> to confirm *
+              </label>
+              <input
+                type="text"
+                placeholder="Type here..."
+                value={deleteConfirmText}
+                onChange={e => setDeleteConfirmText(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
+              />
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setDeletingVoucher(null)}
+                className="text-gray-500 hover:text-gray-700 font-bold text-xs transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteVoucher}
+                disabled={deleteConfirmText !== 'im sure to delete' || deleting}
+                className={`flex items-center space-x-1.5 px-4 py-2 rounded-lg text-xs font-black transition-all ${
+                  deleteConfirmText === 'im sure to delete' && !deleting
+                    ? 'bg-red-600 hover:bg-red-700 text-white shadow-sm shadow-red-200'
+                    : 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                }`}
+              >
+                {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                <span>{deleting ? 'Deleting...' : 'Delete Voucher'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Email Dispatcher Modal */}
+      {showEmailModal && sendEmailItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-gray-200 p-6 space-y-4">
+            <div className="flex justify-between items-center border-b border-gray-100 pb-3">
+              <div className="flex items-center space-x-2.5 text-blue-600">
+                <Mail size={18} />
+                <h3 className="text-gray-900 font-black text-sm">Send Voucher by Email</h3>
+              </div>
+              <button onClick={() => setShowEmailModal(false)} className="text-gray-400 hover:text-gray-600">
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSendEmail} className="space-y-4 text-xs">
+              <div className="space-y-1">
+                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">Recipient (To) *</label>
+                <input
+                  type="email"
+                  required
+                  placeholder="recipient@example.com"
+                  value={sendEmailTo}
+                  onChange={e => setSendEmailTo(e.target.value)}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">CC</label>
+                  <input
+                    type="text"
+                    placeholder="cc@example.com"
+                    value={sendEmailCc}
+                    onChange={e => setSendEmailCc(e.target.value)}
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">BCC</label>
+                  <input
+                    type="text"
+                    placeholder="bcc@example.com"
+                    value={sendEmailBcc}
+                    onChange={e => setSendEmailBcc(e.target.value)}
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">Subject *</label>
+                <input
+                  type="text"
+                  required
+                  value={sendEmailSubject}
+                  onChange={e => setSendEmailSubject(e.target.value)}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">Intro Message</label>
+                <textarea
+                  rows={4}
+                  placeholder="Enter a message to include above the voucher..."
+                  value={sendEmailMessage}
+                  onChange={e => setSendEmailMessage(e.target.value)}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
+                />
+              </div>
+
+              <div className="p-3 bg-blue-50/50 border border-blue-100 rounded-xl">
+                <p className="text-[10px] text-blue-800 font-bold">Relay Method:</p>
+                <p className="text-[10px] text-blue-700 font-semibold mt-0.5 leading-relaxed">
+                  The voucher will be rendered as a premium HTML template directly in the email body, powered by your saved SMTP office365 server relay settings.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end space-x-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowEmailModal(false)}
+                  className="text-gray-500 hover:text-gray-700 font-bold text-xs transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={emailSending}
+                  className="flex items-center space-x-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-black transition disabled:opacity-50"
+                >
+                  {emailSending ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />}
+                  <span>{emailSending ? 'Sending...' : 'Send Email'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
 export default TreasuryVouchers;
+
+function generateVoucherEmailHtml(voucher: any, customMessage: string, companyDetails: Record<string, string>) {
+  const formattedAmount = (voucher.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2 });
+  return `
+    <html>
+      <body style="font-family: sans-serif; color: #1e293b; background: #f8fafc; padding: 20px;">
+        <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+          <!-- Top Bar -->
+          <div style="background: #0f172a; padding: 24px; color: #ffffff;">
+            <table style="width: 100%; border-collapse: collapse;">
+              <tr>
+                <td style="vertical-align: middle;">
+                  <div style="display: flex; align-items: middle; gap: 12px;">
+                    ${companyDetails.company_logo_url ? `<img src="${companyDetails.company_logo_url}" style="height: 40px; width: 40px; object-fit: contain; border-radius: 6px; background: white; padding: 2px;" />` : ''}
+                    <div>
+                      <h1 style="font-size: 18px; font-weight: 800; margin: 0; font-family: sans-serif;">${companyDetails.company_name || 'PowerPod Technologies'}</h1>
+                      <p style="font-size: 10px; color: #94a3b8; margin: 2px 0 0 0; font-family: sans-serif;">VAT TRN: ${companyDetails.company_trn || '100342938400003'}</p>
+                    </div>
+                  </div>
+                </td>
+                <td style="text-align: right; vertical-align: middle;">
+                  <span style="background: #10b981; padding: 6px 12px; border-radius: 6px; font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px;">
+                    VOUCHER
+                  </span>
+                </td>
+              </tr>
+            </table>
+          </div>
+
+          <!-- Custom User Message -->
+          ${customMessage ? `
+            <div style="padding: 24px; border-bottom: 1px solid #f1f5f9; font-family: sans-serif; font-size: 13px; line-height: 1.6; color: #334155; background: #faf5ff;">
+              ${customMessage.replace(/\\n/g, '<br/>')}
+            </div>
+          ` : ''}
+
+          <!-- Details -->
+          <div style="padding: 24px;">
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
+              <tr>
+                <td>
+                  <p style="font-size: 10px; font-weight: bold; text-transform: uppercase; color: #94a3b8; margin: 0 0 4px 0;">
+                    ${voucher.voucher_type === 'receipt' ? 'Received From' : 'Paid To'}
+                  </p>
+                  <p style="font-size: 16px; font-weight: bold; color: #0f172a; margin: 0;">${voucher.party_name}</p>
+                </td>
+                <td style="text-align: right;">
+                  <p style="font-size: 10px; font-weight: bold; text-transform: uppercase; color: #94a3b8; margin: 0 0 4px 0;">Voucher Info</p>
+                  <p style="font-size: 13px; font-weight: bold; color: #0f172a; margin: 0; text-transform: capitalize;">Type: ${voucher.voucher_type}</p>
+                  <p style="font-size: 11px; color: #64748b; margin: 2px 0 0 0;">Date: ${voucher.voucher_date}</p>
+                  <p style="font-size: 11px; color: #64748b; margin: 2px 0 0 0;">Ref: ${voucher.reference || 'N/A'}</p>
+                </td>
+              </tr>
+            </table>
+
+            <!-- Amount Block -->
+            <div style="background: #f8fafc; border-radius: 8px; padding: 16px; border: 1px solid #e2e8f0; margin-bottom: 20px; text-align: center;">
+              <span style="font-size: 10px; font-weight: bold; text-transform: uppercase; color: #64748b; display: block; margin-bottom: 4px;">Total Amount</span>
+              <span style="font-size: 24px; font-weight: bold; color: #10b981;">AED ${formattedAmount}</span>
+            </div>
+
+            <div style="margin-bottom: 20px;">
+              <p style="font-size: 10px; font-weight: bold; text-transform: uppercase; color: #94a3b8; margin: 0 0 4px 0;">Amount in Words</p>
+              <p style="font-size: 11px; font-weight: bold; color: #0f172a; margin: 0; background: #faf5ff; padding: 10px; border-radius: 6px; border: 1px solid #e9d5ff; font-style: italic; text-transform: uppercase;">
+                ${numberToWords(voucher.amount)}
+              </p>
+            </div>
+
+            <div>
+              <p style="font-size: 10px; font-weight: bold; text-transform: uppercase; color: #94a3b8; margin: 0 0 4px 0;">Purpose / Description</p>
+              <p style="font-size: 13px; font-weight: bold; color: #334155; margin: 0; text-transform: capitalize;">
+                ${voucher.purpose.replace('_', ' ')}
+                ${voucher.notes ? ` — ${voucher.notes}` : ''}
+              </p>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div style="background: #f8fafc; padding: 20px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 11px; color: #94a3b8;">
+            <p style="margin: 0 0 4px 0;">This is a system generated voucher acknowledgment.</p>
+            <p style="margin: 0;">For inquiries, contact us at <a href="mailto:finance@powerpod.ae" style="color: #2563eb; text-decoration: none;">finance@powerpod.ae</a></p>
+          </div>
+        </div>
+      </body>
+    </html>
+  `;
+}

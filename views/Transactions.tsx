@@ -347,7 +347,7 @@ const Transactions: React.FC = () => {
                         - AED {(t.stripe_fee + t.tax_fee).toFixed(2)}
                       </div>
                       <div className="text-[9px] text-gray-400 mt-0.5">
-                        Stripe: {t.stripe_fee.toFixed(2)} | Tax: {t.tax_fee.toFixed(2)}
+                        Fee: {t.stripe_fee.toFixed(2)} | Tax: {t.tax_fee.toFixed(2)}
                       </div>
                     </td>
                     <td className="px-8 py-5 text-right">

@@ -21,7 +21,8 @@ import {
   Briefcase,
   AtSign,
   MessageSquare,
-  Clock
+  Clock,
+  Check
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Merchant } from '../types';
@@ -38,10 +39,68 @@ const Merchants: React.FC = () => {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingMerchant, setEditingMerchant] = useState<Merchant | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [employees, setEmployees] = useState<any[]>([]);
+
+  // Bulk Assignment States
+  const [isBulkMode, setIsBulkMode] = useState(false);
+  const [selectedMerchantIds, setSelectedMerchantIds] = useState<string[]>([]);
+  const [showBulkAssignModal, setShowBulkAssignModal] = useState(false);
+  const [bulkStaffId, setBulkStaffId] = useState('');
+  const [isBulkSaving, setIsBulkSaving] = useState(false);
 
   useEffect(() => {
     fetchMerchants();
+    fetchEmployees();
   }, []);
+
+  const handleBulkAssign = async () => {
+    if (selectedMerchantIds.length === 0) return;
+    setIsBulkSaving(true);
+    try {
+      if (!hasFeature('merchants.edit')) {
+        throw new Error('Access denied: Edit Merchants feature is disabled for your identity.');
+      }
+
+      const { error: updateError } = await supabase
+        .from('merchants')
+        .update({ sales_staff_id: bulkStaffId || null })
+        .in('id', selectedMerchantIds);
+
+      if (updateError) throw updateError;
+
+      // Update local state
+      setMerchants(prev => prev.map(m => {
+        if (selectedMerchantIds.includes(m.id)) {
+          return { ...m, sales_staff_id: bulkStaffId || null };
+        }
+        return m;
+      }));
+
+      alert(`Successfully updated staff assignments for ${selectedMerchantIds.length} merchants.`);
+      setIsBulkMode(false);
+      setSelectedMerchantIds([]);
+      setShowBulkAssignModal(false);
+    } catch (err: any) {
+      alert(`Bulk update failed: ${err.message}`);
+    } finally {
+      setIsBulkSaving(false);
+    }
+  };
+
+  const fetchEmployees = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('employees')
+        .select('id, full_name')
+        .eq('status', 'active')
+        .order('full_name', { ascending: true });
+      if (!error && data) {
+        setEmployees(data);
+      }
+    } catch (e) {
+      console.error('Failed to load employees:', e);
+    }
+  };
 
   const fetchMerchantVenues = async (currentMerchants: Merchant[]) => {
     const mIds = currentMerchants.map(m => m.id);
@@ -136,7 +195,8 @@ const Merchants: React.FC = () => {
           reporting_email: editingMerchant.reporting_email,
           reporting_whatsapp: editingMerchant.reporting_whatsapp,
           notes: editingMerchant.notes,
-          payment_duration: editingMerchant.payment_duration
+          payment_duration: editingMerchant.payment_duration,
+          sales_staff_id: editingMerchant.sales_staff_id || null
         })
         .eq('id', editingMerchant.id);
 
@@ -201,6 +261,18 @@ const Merchants: React.FC = () => {
           }
       }
 
+      // Invalidate reports cache in localStorage so reports page refetches recalculated data
+      try {
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith('reports_cache_')) {
+            localStorage.removeItem(key);
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to clear reports cache:', e);
+      }
+
       setMerchants(merchants.map(m => m.id === editingMerchant.id ? editingMerchant : m));
       setIsEditModalOpen(false);
       setEditingMerchant(null);
@@ -231,7 +303,7 @@ const Merchants: React.FC = () => {
         )}
       </div>
 
-      <div className="bg-white p-5 rounded-[28px] border border-gray-100 shadow-sm flex items-center space-x-4">
+      <div className="bg-white p-5 rounded-[28px] border border-gray-100 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex-1 relative">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
           <input 
@@ -241,6 +313,50 @@ const Merchants: React.FC = () => {
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
+        </div>
+        
+        <div className="flex items-center space-x-3">
+          <button 
+            onClick={() => {
+              setIsBulkMode(!isBulkMode);
+              setSelectedMerchantIds([]);
+            }}
+            className={`px-6 py-3 rounded-2xl font-bold transition-all text-sm flex items-center space-x-2 ${
+              isBulkMode ? 'bg-purple-600 text-white shadow-lg shadow-purple-500/25' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            <span>{isBulkMode ? 'Exit Bulk Mode' : 'Bulk Assign Staff'}</span>
+          </button>
+
+          {isBulkMode && (
+            <button 
+              onClick={() => {
+                const allFilteredIds = filteredMerchants.map(m => m.id);
+                const isAllSelected = allFilteredIds.length > 0 && allFilteredIds.every(id => selectedMerchantIds.includes(id));
+                if (isAllSelected) {
+                  setSelectedMerchantIds([]);
+                } else {
+                  setSelectedMerchantIds(allFilteredIds);
+                }
+              }}
+              className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-6 py-3 rounded-2xl font-bold transition-all text-sm"
+            >
+              <span>
+                {filteredMerchants.length > 0 && filteredMerchants.every(m => selectedMerchantIds.includes(m.id)) 
+                  ? 'Deselect All' 
+                  : 'Select All'}
+              </span>
+            </button>
+          )}
+
+          {isBulkMode && selectedMerchantIds.length > 0 && (
+            <button 
+              onClick={() => setShowBulkAssignModal(true)}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-2xl font-bold transition-all text-sm flex items-center space-x-2 shadow-lg shadow-blue-500/25 animate-in slide-in-from-right-4"
+            >
+              <span>Assign Staff ({selectedMerchantIds.length})</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -260,9 +376,35 @@ const Merchants: React.FC = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
           {filteredMerchants.length > 0 ? filteredMerchants.map((merchant) => {
             const isFixed = merchant.contract_type === 'Fixed Charge - Monthly';
+            const isSelected = selectedMerchantIds.includes(merchant.id);
             return (
-              <div key={merchant.id} className="bg-white rounded-[40px] border border-gray-100 shadow-sm hover:shadow-2xl hover:shadow-gray-100 transition-all group overflow-hidden flex flex-col">
-                <div className="p-8 flex-1">
+              <div 
+                key={merchant.id} 
+                onClick={() => {
+                  if (isBulkMode) {
+                    if (isSelected) {
+                      setSelectedMerchantIds(selectedMerchantIds.filter(id => id !== merchant.id));
+                    } else {
+                      setSelectedMerchantIds([...selectedMerchantIds, merchant.id]);
+                    }
+                  }
+                }}
+                className={`bg-white rounded-[40px] border transition-all group overflow-hidden flex flex-col relative ${
+                  isBulkMode ? 'cursor-pointer select-none' : ''
+                } ${
+                  isSelected ? 'border-purple-600 ring-2 ring-purple-600/20 shadow-xl' : 'border-gray-100 shadow-sm hover:shadow-2xl hover:shadow-gray-100'
+                }`}
+              >
+                {isBulkMode && (
+                  <div className="absolute top-6 left-6 z-10">
+                    <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
+                      isSelected ? 'bg-purple-600 border-purple-600 text-white' : 'bg-white/80 border-gray-300'
+                    }`}>
+                      {isSelected && <Check size={14} className="stroke-[3]" />}
+                    </div>
+                  </div>
+                )}
+                <div className={`p-8 flex-1 ${isBulkMode ? 'pl-16' : ''}`}>
                   <div className="flex justify-between items-start mb-8">
                     <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-blue-700 rounded-3xl flex items-center justify-center text-white font-black text-2xl shadow-lg shadow-blue-500/20">
                       {merchant.merchant_name.charAt(0)}
@@ -291,10 +433,17 @@ const Merchants: React.FC = () => {
                   </div>
 
                   <h3 className="text-2xl font-black text-gray-900 mb-1 tracking-tight">{merchant.merchant_name}</h3>
-                  <p className="text-gray-400 font-medium text-sm mb-4 flex items-center">
+                  <p className="text-gray-400 font-medium text-sm mb-2 flex items-center">
                     <Building2 size={14} className="mr-2" />
                     {merchant.company_name}
                   </p>
+                  
+                  {merchant.sales_staff_id && (
+                    <p className="text-purple-600 font-bold text-xs mb-4 flex items-center">
+                      <User size={12} className="mr-1.5" />
+                      Assigned Staff: {employees.find(e => e.id === merchant.sales_staff_id)?.full_name || 'Staff'}
+                    </p>
+                  )}
                   
                   <div className="space-y-5 border-t border-gray-50 pt-8">
                     <div className="flex items-center text-sm font-bold text-gray-600">
@@ -494,6 +643,19 @@ const Merchants: React.FC = () => {
                           />
                         </div>
                       </div>
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Assigned Sales / Staff</label>
+                        <select 
+                          className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                          value={editingMerchant.sales_staff_id || ''}
+                          onChange={(e) => setEditingMerchant({...editingMerchant, sales_staff_id: e.target.value || null})}
+                        >
+                          <option value="">No Staff Assigned</option>
+                          {employees.map(emp => (
+                            <option key={emp.id} value={emp.id}>{emp.full_name}</option>
+                          ))}
+                        </select>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -632,6 +794,46 @@ const Merchants: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Bulk Assign Modal */}
+      {showBulkAssignModal && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-6">
+          <div className="absolute inset-0 bg-gray-950/40 backdrop-blur-md" onClick={() => setShowBulkAssignModal(false)}></div>
+          <div className="relative w-full max-w-md bg-white rounded-[32px] shadow-2xl p-8 animate-in zoom-in-95 duration-200">
+            <h3 className="text-xl font-black text-gray-900 tracking-tight mb-2">Bulk Assign Sales / Staff</h3>
+            <p className="text-gray-500 font-semibold text-xs mb-6">Assign an employee to the {selectedMerchantIds.length} selected merchant partners.</p>
+            
+            <div className="space-y-4">
+              <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Select Employee</label>
+              <select
+                className="w-full bg-gray-50 border-none px-6 py-4 rounded-2xl text-gray-900 font-bold focus:ring-2 focus:ring-blue-500 transition-all"
+                value={bulkStaffId}
+                onChange={(e) => setBulkStaffId(e.target.value)}
+              >
+                <option value="">No Staff Assigned (Unassign)</option>
+                {employees.map(emp => (
+                  <option key={emp.id} value={emp.id}>{emp.full_name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="mt-8 flex space-x-3">
+              <button
+                onClick={() => setShowBulkAssignModal(false)}
+                className="flex-1 py-4 bg-gray-50 hover:bg-gray-100 rounded-2xl font-bold text-gray-500 transition-all text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBulkAssign}
+                disabled={isBulkSaving}
+                className="flex-[2] bg-blue-600 hover:bg-blue-500 text-white font-black py-4 rounded-2xl transition-all shadow-lg shadow-blue-500/20 active:scale-95 disabled:opacity-50 flex items-center justify-center space-x-2 text-sm"
+              >
+                {isBulkSaving ? <Loader2 size={16} className="animate-spin" /> : <span>Confirm Assignment</span>}
+              </button>
+            </div>
           </div>
         </div>
       )}

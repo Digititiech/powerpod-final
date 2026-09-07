@@ -256,6 +256,13 @@ export const FEATURE_DEFINITIONS: FeatureDefinition[] = [
     defaultByRole: { admin: true, staff: false, technician: false, accountant: true },
   },
   {
+    key: 'ledger.journal.delete',
+    label: 'Delete Journal Entries',
+    category: 'Accounting',
+    description: 'Allow deleting manual journal vouchers and adjusting entries.',
+    defaultByRole: { admin: true, staff: false, technician: false, accountant: true },
+  },
+  {
     key: 'ledger.period.lock',
     label: 'Lock / Unlock Accounting Periods',
     category: 'Accounting',
@@ -310,6 +317,13 @@ export const FEATURE_DEFINITIONS: FeatureDefinition[] = [
     category: 'Accounting',
     description: 'Allow matching statements and performing reconciliation.',
     defaultByRole: { admin: true, staff: false, technician: false, accountant: true },
+  },
+  {
+    key: 'finance.invoices.manage',
+    label: 'Manage Invoices & Quotations',
+    category: 'Accounting',
+    description: 'Allow creating invoices, quotations, converting quotes, and linking payments.',
+    defaultByRole: { admin: true, staff: true, technician: false, accountant: true },
   },
   {
     key: 'finance.payroll.approve',
@@ -369,6 +383,7 @@ export const resolveFeatureFlags = (role: UserRole, stored?: FeatureFlags | null
       'settings.db.test',
       'settings.whatsapp.disconnect',
       'ledger.journal.write',
+      'ledger.journal.delete',
       'ledger.period.lock',
     ];
     for (const k of restricted) resolved[k] = false;
